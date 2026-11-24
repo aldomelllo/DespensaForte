@@ -1,0 +1,6 @@
+{
+  "name": "DespensaForte",
+  "description": "Controle de estoque caseiro e sobrevivencialismo com leitura automatizada de cupom fiscal, histórico de preços, economia acumulada por categoria e alertas de validade.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
