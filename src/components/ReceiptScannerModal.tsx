@@ -74,6 +74,7 @@ export function ReceiptScannerModal({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [compressionNote, setCompressionNote] = useState<string | null>(null);
+  const [lastFile, setLastFile] = useState<File | null>(null);
 
   const todayIso = new Date().toISOString().slice(0, 10);
   const [storeName, setStoreName] = useState('');
@@ -107,6 +108,7 @@ export function ReceiptScannerModal({
   }
 
   async function handleFileSelected(file: File) {
+    setLastFile(file);
     setErrorMsg(null);
     setCompressionNote(null);
     setIsLoading(true);
@@ -338,8 +340,17 @@ export function ReceiptScannerModal({
           </div>
 
           {errorMsg && (
-            <div role="alert" className="p-3.5 rounded-lg border border-red-200 bg-red-50 text-xs font-medium text-red-800">
-              {errorMsg}
+            <div role="alert" className="p-3.5 rounded-lg border border-red-200 bg-red-50 text-xs font-medium text-red-800 flex flex-wrap items-center justify-between gap-3">
+              <span>{errorMsg}</span>
+              {mode === 'photo' && lastFile && !isLoading && (
+                <button
+                  type="button"
+                  onClick={() => void handleFileSelected(lastFile)}
+                  className="px-3 py-1.5 text-xs font-semibold text-white bg-red-700 hover:bg-red-800 rounded-md whitespace-nowrap shrink-0"
+                >
+                  Tentar novamente
+                </button>
+              )}
             </div>
           )}
 
@@ -361,6 +372,7 @@ export function ReceiptScannerModal({
                     id="receipt-photo-input"
                     onChange={(e) => {
                       const file = e.target.files?.[0];
+                      e.target.value = '';
                       if (file) void handleFileSelected(file);
                     }}
                   />

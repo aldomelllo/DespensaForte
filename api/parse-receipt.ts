@@ -83,7 +83,9 @@ export default async function handler(req: ApiRequestLike, res: ApiResponseLike)
         [
           process.env.GEMINI_MODEL?.trim(),
           'gemini-3.8-flash',
+          'gemini-3.8-flash-lite',
           'gemini-3.5-flash',
+          'gemini-2.5-flash-lite',
           'gemini-2.5-flash',
         ].filter((m): m is string => Boolean(m))
       )
@@ -139,28 +141,52 @@ export default async function handler(req: ApiRequestLike, res: ApiResponseLike)
       ],
     };
 
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
     let response = null;
     let lastError: unknown = null;
+    let sawHighDemand = false;
 
     for (const modelName of candidateModels) {
-      try {
-        response = await ai.models.generateContent({
-          model: modelName,
-          contents,
-          config: requestConfig,
-        });
-        break;
-      } catch (err) {
-        lastError = err;
-        const msg = err instanceof Error ? err.message : String(err);
-        if (/404|NOT_FOUND|no longer available/i.test(msg)) {
-          continue;
+      const maxAttempts = modelName === candidateModels[0] ? 2 : 1;
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          response = await ai.models.generateContent({
+            model: modelName,
+            contents,
+            config: requestConfig,
+          });
+          break;
+        } catch (err) {
+          lastError = err;
+          const msg = err instanceof Error ? err.message : String(err);
+          const isNotFound = /404|NOT_FOUND|no longer available/i.test(msg);
+          const isTransient = /503|UNAVAILABLE|high demand|overloaded|429|RESOURCE_EXHAUSTED/i.test(msg);
+
+          if (isNotFound) {
+            break; // pula para o próximo modelo imediatamente
+          }
+          if (isTransient) {
+            sawHighDemand = true;
+            if (attempt < maxAttempts) {
+              await sleep(1500);
+              continue;
+            }
+            break; // tenta o próximo modelo alternativo
+          }
+          throw err;
         }
-        throw err;
       }
+      if (response) break;
     }
 
     if (!response) {
+      if (sawHighDemand) {
+        res.status(503).json({
+          error:
+            'O serviço gratuito do Google Gemini está temporariamente sobrecarregado (pico de demanda). Aguarde cerca de 10 segundos e tente enviar a foto novamente — ou use a aba "Texto Local / Offline".',
+        });
+        return;
+      }
       throw lastError ?? new Error('Nenhum modelo Gemini disponível respondeu à solicitação.');
     }
 
@@ -175,6 +201,13 @@ export default async function handler(req: ApiRequestLike, res: ApiResponseLike)
   } catch (error) {
     console.error('Erro ao analisar cupom fiscal (Vercel API):', error);
     const message = error instanceof Error ? error.message : 'Erro interno ao ler cupom fiscal.';
+    if (/503|UNAVAILABLE|high demand|overloaded/i.test(message)) {
+      res.status(503).json({
+        error:
+          'O serviço gratuito do Google Gemini está temporariamente sobrecarregado (pico de demanda). Aguarde alguns segundos e tente enviar a foto novamente.',
+      });
+      return;
+    }
     res.status(500).json({ error: `Falha ao processar imagem do cupom: ${message}` });
   }
 }
