@@ -2,7 +2,8 @@ import type { AppState } from '../types/inventory';
 import { createSeedState } from '../data/seedData';
 import { defaultIsStockpileForCategory } from './analytics';
 
-const STORAGE_KEY = 'despensaforte_local_state_v1';
+const LEGACY_STORAGE_KEY = 'despensaforte_local_state_v1';
+const userCacheKey = (userId: string) => `despensaforte_user_state_${userId}`;
 
 export function createEmptyState(): AppState {
   return {
@@ -61,19 +62,37 @@ export function normalizeAppState(rawState: AppState): AppState {
   };
 }
 
+export function loadCachedUserState(userId: string): AppState | null {
+  try {
+    const raw = window.localStorage.getItem(userCacheKey(userId));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as AppState;
+    if (!parsed || !Array.isArray(parsed.inventory) || !Array.isArray(parsed.priceHistory)) {
+      return null;
+    }
+    return normalizeAppState(parsed);
+  } catch {
+    return null;
+  }
+}
+
+export function saveCachedUserState(userId: string, state: AppState): void {
+  try {
+    window.localStorage.setItem(userCacheKey(userId), JSON.stringify(state));
+  } catch (err) {
+    console.error('Erro ao salvar cache local do usuário:', err);
+  }
+}
+
 export function loadAppState(): AppState {
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
+    const raw = window.localStorage.getItem(LEGACY_STORAGE_KEY);
     if (!raw) {
-      const seeded = createSeedState();
-      saveAppState(seeded);
-      return seeded;
+      return createSeedState();
     }
     const parsed = JSON.parse(raw) as AppState;
     if (!parsed || !Array.isArray(parsed.inventory) || !Array.isArray(parsed.priceHistory)) {
-      const seeded = createSeedState();
-      saveAppState(seeded);
-      return seeded;
+      return createSeedState();
     }
     return normalizeAppState(parsed);
   } catch {
@@ -83,7 +102,7 @@ export function loadAppState(): AppState {
 
 export function saveAppState(state: AppState): void {
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    window.localStorage.setItem(LEGACY_STORAGE_KEY, JSON.stringify(state));
   } catch (err) {
     console.error('Erro ao salvar estado local:', err);
   }

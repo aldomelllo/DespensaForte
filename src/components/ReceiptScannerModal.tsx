@@ -33,6 +33,12 @@ import { compressReceiptImage } from '../utils/imageCompression';
 interface ReceiptScannerModalProps {
   isOpen: boolean;
   priceTrends: PriceTrendAnalysis[];
+  currentUser?: {
+    role: 'admin' | 'user';
+    ocrMonthlyLimit: number;
+    ocrUsedThisMonth: number;
+  } | null;
+  onOcrUsageUpdated?: (used: number) => void;
   onClose: () => void;
   onConfirmReceipt: (payload: {
     storeName: string;
@@ -60,11 +66,18 @@ interface ApiParseResponse {
   purchaseDate?: string;
   items?: ApiParsedItem[];
   error?: string;
+  _ocrUsage?: {
+    used: number;
+    limit: number;
+    monthKey: string;
+  };
 }
 
 export function ReceiptScannerModal({
   isOpen,
   priceTrends,
+  currentUser = null,
+  onOcrUsageUpdated,
   onClose,
   onConfirmReceipt,
 }: ReceiptScannerModalProps) {
@@ -125,6 +138,7 @@ export function ReceiptScannerModal({
 
       const response = await fetch('/api/parse-receipt', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           imageBase64: compressed.dataUrl,
@@ -136,6 +150,10 @@ export function ReceiptScannerModal({
       const data = (await response.json()) as ApiParseResponse;
       if (!response.ok) {
         throw new Error(data.error || 'Não foi possível extrair os itens da foto.');
+      }
+
+      if (data._ocrUsage && onOcrUsageUpdated) {
+        onOcrUsageUpdated(data._ocrUsage.used);
       }
 
       const detectedDate = data.purchaseDate || todayIso;
@@ -363,6 +381,15 @@ export function ReceiptScannerModal({
                 <p className="text-xs text-slate-600">
                   A foto é redimensionada no seu celular/navegador (máx. 1600px JPEG) antes do envio para leitura rápida. Depois você revisa os itens, escolhe o destino (Estocar ou Rotineira) e informa a validade se quiser.
                 </p>
+                {currentUser && currentUser.role !== 'admin' && (
+                  <p className="text-xs font-mono text-emerald-800">
+                    Cota mensal de leitura por foto:{' '}
+                    <strong>
+                      {currentUser.ocrUsedThisMonth} / {currentUser.ocrMonthlyLimit}
+                    </strong>{' '}
+                    usadas este mês
+                  </p>
+                )}
                 <div className="pt-2 flex flex-wrap items-center gap-3">
                   <input
                     ref={fileInputRef}

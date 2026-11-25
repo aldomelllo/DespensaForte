@@ -1,12 +1,5 @@
-interface ApiRequestLike {
-  method?: string;
-}
-
-interface ApiResponseLike {
-  status(code: number): ApiResponseLike;
-  json(body: unknown): void;
-  setHeader?(name: string, value: string): void;
-}
+import { isCloudStorageConfigured, isStorageReady } from './_lib/store';
+import type { ApiRequestLike, ApiResponseLike } from './_lib/types';
 
 export default function handler(req: ApiRequestLike, res: ApiResponseLike) {
   if (req.method && req.method !== 'GET') {
@@ -24,7 +17,10 @@ export default function handler(req: ApiRequestLike, res: ApiResponseLike) {
 
   res.status(200).json({
     status: 'ok',
-    localFirst: true,
+    localFirst: false,
+    multiTenant: true,
+    storageConfigured: isCloudStorageConfigured(),
+    storageReady: isStorageReady(),
     ocrConfigured,
     model: process.env.GEMINI_MODEL?.trim() || 'gemini-3.8-flash',
     timestamp: new Date().toISOString(),

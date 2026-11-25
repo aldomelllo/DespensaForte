@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Loader2 } from 'lucide-react';
 import { TopBar, type ActiveTab } from './components/TopBar';
 import { DashboardView } from './components/DashboardView';
 import { InventoryView, type PantryScope } from './components/InventoryView';
@@ -6,7 +7,10 @@ import { PriceEvolutionView } from './components/PriceEvolutionView';
 import { ReceiptsView } from './components/ReceiptsView';
 import { MonthlyReportView } from './components/MonthlyReportView';
 import { SettingsAlertsView } from './components/SettingsAlertsView';
+import { AdminUsersView } from './components/AdminUsersView';
+import { AuthGateView } from './components/AuthGateView';
 import { ReceiptScannerModal } from './components/ReceiptScannerModal';
+import type { AuthUser } from './types/auth';
 import type {
   AlertSettings,
   AppState,
@@ -25,8 +29,19 @@ import {
   normalizeProductKey,
 } from './utils/analytics';
 import { createSeedState } from './data/seedData';
-import { createEmptyState, loadAppState, saveAppState } from './utils/storage';
+import {
+  createEmptyState,
+  loadCachedUserState,
+  normalizeAppState,
+  saveCachedUserState,
+} from './utils/storage';
 import { decodeSharedReportFromHash } from './utils/shareReport';
+import {
+  fetchAuthStatus,
+  fetchUserCloudState,
+  logoutSession,
+  saveUserCloudState,
+} from './services/api';
 import {
   buildExpiryAlertMessage,
   dispatchLocalPushNotification,
@@ -35,37 +50,146 @@ import {
 } from './utils/notifications';
 
 export default function App() {
-  const [appState, setAppState] = useState<AppState>(() => loadAppState());
   const [sharedReport, setSharedReport] = useState<SharedMonthlyReportPayload | null>(() =>
     typeof window !== 'undefined' ? decodeSharedReportFromHash(window.location.hash) : null
   );
-  const [activeTab, setActiveTab] = useState<ActiveTab>(() =>
-    typeof window !== 'undefined' && decodeSharedReportFromHash(window.location.hash)
-      ? 'report'
-      : 'dashboard'
-  );
+
+  // Estado de autenticação e conta ativa
+  const [authLoading, setAuthLoading] = useState(true);
+  const [storageConfigured, setStorageConfigured] = useState(true);
+  const [storageError, setStorageError] = useState<string | undefined>(undefined);
+  const [needsBootstrap, setNeedsBootstrap] = useState(false);
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+
+  // Estado da despensa isolado por usuário
+  const [appState, setAppState] = useState<AppState>(() => createEmptyState());
+  const [stateLoadedForUserId, setStateLoadedForUserId] = useState<string | null>(null);
+  const [syncStatus, setSyncStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const saveTimerRef = useRef<number | null>(null);
+
+  const [activeTab, setActiveTab] = useState<ActiveTab>('dashboard');
   const [isScannerOpen, setIsScannerOpen] = useState(false);
   const [selectedProductKey, setSelectedProductKey] = useState<string | null>(null);
   const [inventoryCategoryFilter, setInventoryCategoryFilter] = useState<CategoryId | 'Todas'>('Todas');
   const [inventoryPantryScope, setInventoryPantryScope] = useState<PantryScope>('all');
 
+  const checkSession = useCallback(async () => {
+    setAuthLoading(true);
+    try {
+      const status = await fetchAuthStatus();
+      setStorageConfigured(status.storageConfigured);
+      setStorageError(status.error);
+      setNeedsBootstrap(status.needsBootstrap);
+      setCurrentUser(status.user);
+    } catch (err) {
+      setStorageConfigured(true);
+      setCurrentUser(null);
+      setStorageError(err instanceof Error ? err.message : undefined);
+    } finally {
+      setAuthLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
-    saveAppState(appState);
-  }, [appState]);
+    void checkSession();
+  }, [checkSession]);
 
   useEffect(() => {
     function handleHashChange() {
       const decoded = decodeSharedReportFromHash(window.location.hash);
       setSharedReport(decoded);
-      if (decoded) {
-        setActiveTab('report');
-      }
     }
     window.addEventListener('hashchange', handleHashChange);
     return () => window.removeEventListener('hashchange', handleHashChange);
   }, []);
 
+  // Carrega dados isolados da nuvem sempre que o usuário logado mudar
   useEffect(() => {
+    if (!currentUser) {
+      setStateLoadedForUserId(null);
+      setAppState(createEmptyState());
+      setSyncStatus('idle');
+      return;
+    }
+
+    let cancelled = false;
+    const userId = currentUser.id;
+    const isAdmin = currentUser.role === 'admin';
+
+    async function hydrateUserPantry() {
+      setStateLoadedForUserId(null);
+      try {
+        const cloudState = await fetchUserCloudState();
+        if (cancelled) return;
+
+        if (cloudState) {
+          const normalized = normalizeAppState(cloudState);
+          setAppState(normalized);
+          saveCachedUserState(userId, normalized);
+          setSyncStatus('saved');
+        } else {
+          const cached = loadCachedUserState(userId);
+          const initial = cached ?? (isAdmin ? createSeedState() : createEmptyState());
+          setAppState(initial);
+          saveCachedUserState(userId, initial);
+          // Persiste estado inicial isolado do usuário na nuvem
+          await saveUserCloudState(initial).catch(() => {});
+          setSyncStatus('saved');
+        }
+        setStateLoadedForUserId(userId);
+      } catch (err) {
+        if (cancelled) return;
+        if (err instanceof Error && err.message === 'UNAUTHORIZED') {
+          setCurrentUser(null);
+          return;
+        }
+        const fallback = loadCachedUserState(userId) ?? createEmptyState();
+        setAppState(fallback);
+        setStateLoadedForUserId(userId);
+        setSyncStatus('error');
+      }
+    }
+
+    void hydrateUserPantry();
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser?.id]);
+
+  // Salva automaticamente na nuvem (isolado pelo cookie do usuário logado) com debounce
+  useEffect(() => {
+    if (!currentUser || stateLoadedForUserId !== currentUser.id) return;
+
+    saveCachedUserState(currentUser.id, appState);
+    setSyncStatus('saving');
+
+    if (saveTimerRef.current) {
+      window.clearTimeout(saveTimerRef.current);
+    }
+
+    saveTimerRef.current = window.setTimeout(() => {
+      void saveUserCloudState(appState)
+        .then(() => {
+          setSyncStatus('saved');
+        })
+        .catch((err) => {
+          if (err instanceof Error && err.message === 'UNAUTHORIZED') {
+            setCurrentUser(null);
+            return;
+          }
+          setSyncStatus('error');
+        });
+    }, 650);
+
+    return () => {
+      if (saveTimerRef.current) {
+        window.clearTimeout(saveTimerRef.current);
+      }
+    };
+  }, [appState, currentUser?.id, stateLoadedForUserId]);
+
+  useEffect(() => {
+    if (!currentUser || stateLoadedForUserId !== currentUser.id) return;
     if (getNotificationPermissionState() === 'granted' && appState.settings.pushEnabled) {
       void registerNotificationWorker();
       const digest = buildExpiryAlertMessage(
@@ -77,7 +201,7 @@ export default function App() {
         void dispatchLocalPushNotification(digest.title, digest.body, 'despensaforte-startup');
       }
     }
-  }, []);
+  }, [currentUser?.id, stateLoadedForUserId]);
 
   const priceTrends = useMemo(
     () => analyzeProductPriceTrends(appState.priceHistory),
@@ -103,6 +227,18 @@ export default function App() {
       ),
     [appState]
   );
+
+  async function handleLogout() {
+    if (saveTimerRef.current) {
+      window.clearTimeout(saveTimerRef.current);
+    }
+    await logoutSession();
+    setCurrentUser(null);
+    setStateLoadedForUserId(null);
+    setAppState(createEmptyState());
+    setActiveTab('dashboard');
+    setIsScannerOpen(false);
+  }
 
   function handleConfirmReceipt(payload: {
     storeName: string;
@@ -284,14 +420,73 @@ export default function App() {
     setActiveTab('dashboard');
   }
 
+  // Link de relatório somente leitura (#share=...) pode ser aberto por quem recebeu o link sem precisar de login
+  if (sharedReport) {
+    return (
+      <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900">
+        <header className="sticky top-0 z-30 bg-white border-b border-slate-200 no-print">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-14 flex items-center justify-between">
+            <span className="text-lg font-bold tracking-tight text-slate-900">
+              DespensaForte
+            </span>
+            <button
+              type="button"
+              onClick={handleExitSharedMode}
+              className="px-3.5 py-1.5 text-xs font-medium text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg"
+            >
+              Entrar na minha conta
+            </button>
+          </div>
+        </header>
+        <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
+          <MonthlyReportView
+            priceHistory={[]}
+            receipts={[]}
+            sharedPayload={sharedReport}
+            onExitSharedMode={handleExitSharedMode}
+          />
+        </main>
+      </div>
+    );
+  }
+
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center gap-3 text-slate-600">
+        <Loader2 className="w-6 h-6 animate-spin text-emerald-700" aria-hidden="true" />
+        <p className="text-sm font-medium">Carregando DespensaForte...</p>
+      </div>
+    );
+  }
+
+  if (!storageConfigured || !currentUser) {
+    return (
+      <AuthGateView
+        storageConfigured={storageConfigured}
+        needsBootstrap={needsBootstrap}
+        storageError={storageError}
+        onAuthenticated={(user) => {
+          setCurrentUser(user);
+          setNeedsBootstrap(false);
+          setActiveTab('dashboard');
+        }}
+        onRetryStatus={() => void checkSession()}
+      />
+    );
+  }
+
+  const isLoadingUserPantry = stateLoadedForUserId !== currentUser.id;
+  const effectiveTab: ActiveTab =
+    activeTab === 'admin' && currentUser.role !== 'admin' ? 'dashboard' : activeTab;
+
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900">
       <TopBar
-        activeTab={activeTab}
+        activeTab={effectiveTab}
+        currentUser={currentUser}
+        syncStatus={syncStatus}
         onSelectTab={(tab) => {
-          if (sharedReport) {
-            handleExitSharedMode();
-          }
+          if (tab === 'admin' && currentUser.role !== 'admin') return;
           if (tab === 'inventory') {
             setInventoryCategoryFilter('Todas');
             setInventoryPantryScope('all');
@@ -299,19 +494,18 @@ export default function App() {
           setActiveTab(tab);
         }}
         onOpenScanner={() => setIsScannerOpen(true)}
+        onLogout={() => void handleLogout()}
       />
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {sharedReport ? (
-          <MonthlyReportView
-            priceHistory={appState.priceHistory}
-            receipts={appState.receipts}
-            sharedPayload={sharedReport}
-            onExitSharedMode={handleExitSharedMode}
-          />
+        {isLoadingUserPantry ? (
+          <div className="py-20 flex flex-col items-center justify-center gap-3 text-slate-500">
+            <Loader2 className="w-6 h-6 animate-spin text-emerald-700" aria-hidden="true" />
+            <p className="text-sm">Carregando sua despensa privada...</p>
+          </div>
         ) : (
           <>
-            {activeTab === 'dashboard' && (
+            {effectiveTab === 'dashboard' && (
               <DashboardView
                 kpis={kpis}
                 categorySavings={categorySavings}
@@ -329,7 +523,7 @@ export default function App() {
               />
             )}
 
-            {activeTab === 'inventory' && (
+            {effectiveTab === 'inventory' && (
               <InventoryView
                 inventory={appState.inventory}
                 warningDays={appState.settings.warningDays}
@@ -345,7 +539,7 @@ export default function App() {
               />
             )}
 
-            {activeTab === 'prices' && (
+            {effectiveTab === 'prices' && (
               <PriceEvolutionView
                 trends={priceTrends}
                 selectedProductKey={selectedProductKey}
@@ -353,28 +547,35 @@ export default function App() {
               />
             )}
 
-            {activeTab === 'receipts' && (
+            {effectiveTab === 'receipts' && (
               <ReceiptsView
                 receipts={appState.receipts}
                 onOpenScanner={() => setIsScannerOpen(true)}
               />
             )}
 
-            {activeTab === 'report' && (
+            {effectiveTab === 'report' && (
               <MonthlyReportView
                 priceHistory={appState.priceHistory}
                 receipts={appState.receipts}
               />
             )}
 
-            {activeTab === 'alerts' && (
+            {effectiveTab === 'alerts' && (
               <SettingsAlertsView
                 appState={appState}
+                currentUser={currentUser}
+                onUserUpdated={(updated) => setCurrentUser(updated)}
+                onLogout={() => void handleLogout()}
                 onUpdateSettings={handleUpdateSettings}
                 onImportState={(newState) => setAppState(newState)}
                 onResetDemoData={() => setAppState(createSeedState())}
                 onStartCleanPantry={() => setAppState(createEmptyState())}
               />
+            )}
+
+            {effectiveTab === 'admin' && currentUser.role === 'admin' && (
+              <AdminUsersView currentUser={currentUser} />
             )}
           </>
         )}
@@ -382,7 +583,10 @@ export default function App() {
 
       <footer className="border-t border-slate-200 bg-white no-print">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex flex-wrap items-center justify-between gap-4 text-xs text-slate-500">
-          <span>DespensaForte · Dados 100% privados no seu navegador</span>
+          <span>
+            DespensaForte · Conta conectada:{' '}
+            <strong className="text-slate-700">{currentUser.displayName}</strong> (dados privados e isolados)
+          </span>
           <span>Controle de Gastos de Feira, Despensa Rotineira &amp; Estocagem</span>
         </div>
       </footer>
@@ -390,6 +594,10 @@ export default function App() {
       <ReceiptScannerModal
         isOpen={isScannerOpen}
         priceTrends={priceTrends}
+        currentUser={currentUser}
+        onOcrUsageUpdated={(used) =>
+          setCurrentUser((prev) => (prev ? { ...prev, ocrUsedThisMonth: used } : prev))
+        }
         onClose={() => setIsScannerOpen(false)}
         onConfirmReceipt={handleConfirmReceipt}
       />

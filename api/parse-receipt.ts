@@ -1,14 +1,12 @@
 import { GoogleGenAI, Type } from '@google/genai';
-
-interface ApiRequestLike {
-  method?: string;
-  body?: unknown;
-}
-
-interface ApiResponseLike {
-  status(code: number): ApiResponseLike;
-  json(body: unknown): void;
-}
+import {
+  checkOcrQuotaForUser,
+  getAuthenticatedUser,
+  getCurrentMonthKey,
+  incrementOcrUsage,
+} from './_lib/auth';
+import { isStorageReady } from './_lib/store';
+import type { ApiRequestLike, ApiResponseLike } from './_lib/types';
 
 const VALID_CATEGORIES = [
   'Hortifruti & Feira',
@@ -29,6 +27,30 @@ export default async function handler(req: ApiRequestLike, res: ApiResponseLike)
   }
 
   try {
+    if (!isStorageReady()) {
+      res.status(503).json({
+        error: 'Banco de dados na nuvem não configurado. Conecte o Upstash Redis na Vercel.',
+      });
+      return;
+    }
+
+    const sessionUser = await getAuthenticatedUser(req);
+    if (!sessionUser) {
+      res.status(401).json({
+        error: 'Faça login com seu usuário e senha para usar a leitura de cupons por foto.',
+      });
+      return;
+    }
+
+    const monthKey = getCurrentMonthKey();
+    const quota = await checkOcrQuotaForUser(sessionUser, monthKey);
+    if (!quota.allowed) {
+      res.status(429).json({
+        error: `Você atingiu o limite de ${quota.limit} leituras por foto neste mês (${monthKey}). Use a aba "Texto Local / Offline" ou solicite ampliação ao administrador.`,
+      });
+      return;
+    }
+
     const apiKey = process.env.GEMINI_API_KEY;
     if (
       !apiKey ||
@@ -163,7 +185,7 @@ export default async function handler(req: ApiRequestLike, res: ApiResponseLike)
           const isTransient = /503|UNAVAILABLE|high demand|overloaded|429|RESOURCE_EXHAUSTED/i.test(msg);
 
           if (isNotFound) {
-            break; // pula para o próximo modelo imediatamente
+            break;
           }
           if (isTransient) {
             sawHighDemand = true;
@@ -171,7 +193,7 @@ export default async function handler(req: ApiRequestLike, res: ApiResponseLike)
               await sleep(1500);
               continue;
             }
-            break; // tenta o próximo modelo alternativo
+            break;
           }
           throw err;
         }
@@ -196,8 +218,17 @@ export default async function handler(req: ApiRequestLike, res: ApiResponseLike)
       return;
     }
 
-    const parsed = JSON.parse(rawText);
-    res.status(200).json(parsed);
+    const parsed = JSON.parse(rawText) as Record<string, unknown>;
+    const usedAfter = await incrementOcrUsage(sessionUser.id, monthKey);
+
+    res.status(200).json({
+      ...parsed,
+      _ocrUsage: {
+        used: usedAfter,
+        limit: sessionUser.role === 'admin' ? -1 : sessionUser.ocrMonthlyLimit,
+        monthKey,
+      },
+    });
   } catch (error) {
     console.error('Erro ao analisar cupom fiscal (Vercel API):', error);
     const message = error instanceof Error ? error.message : 'Erro interno ao ler cupom fiscal.';
