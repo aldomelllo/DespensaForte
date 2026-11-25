@@ -1,5 +1,5 @@
-import { isCloudStorageConfigured, isStorageReady } from './_lib/store';
-import type { ApiRequestLike, ApiResponseLike } from './_lib/types';
+import { isCloudStorageConfigured, isStorageReady } from './_lib/store.js';
+import type { ApiRequestLike, ApiResponseLike } from './_lib/types.js';
 
 export default function handler(req: ApiRequestLike, res: ApiResponseLike) {
   if (req.method && req.method !== 'GET') {

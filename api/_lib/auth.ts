@@ -1,12 +1,12 @@
 import crypto from 'node:crypto';
-import { getStore, isVercelRuntime } from './store';
+import { getStore, isVercelRuntime } from './store.js';
 import type {
   ApiRequestLike,
   ApiResponseLike,
   PublicUser,
   StoredUser,
   UserRole,
-} from './types';
+} from './types.js';
 
 export const SESSION_COOKIE_NAME = 'df_session';
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 dias

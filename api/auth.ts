@@ -7,9 +7,9 @@ import {
   hasAnyUsers,
   setSessionCookie,
   toPublicUser,
-} from './_lib/auth';
-import { isStorageReady } from './_lib/store';
-import type { ApiRequestLike, ApiResponseLike } from './_lib/types';
+} from './_lib/auth.js';
+import { isStorageReady } from './_lib/store.js';
+import type { ApiRequestLike, ApiResponseLike } from './_lib/types.js';
 
 function parseBody(req: ApiRequestLike): Record<string, unknown> {
   if (!req.body) return {};

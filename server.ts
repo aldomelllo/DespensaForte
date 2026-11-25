@@ -2,12 +2,12 @@ import 'dotenv/config';
 import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import healthHandler from './api/health';
-import authHandler from './api/auth';
-import stateHandler from './api/state';
-import adminUsersHandler from './api/admin-users';
-import parseReceiptHandler from './api/parse-receipt';
-import type { ApiRequestLike, ApiResponseLike } from './api/_lib/types';
+import healthHandler from './api/health.js';
+import authHandler from './api/auth.js';
+import stateHandler from './api/state.js';
+import adminUsersHandler from './api/admin-users.js';
+import parseReceiptHandler from './api/parse-receipt.js';
+import type { ApiRequestLike, ApiResponseLike } from './api/_lib/types.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

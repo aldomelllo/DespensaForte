@@ -147,9 +147,18 @@ export function AuthGateView({
           </p>
         </div>
 
-        {errorMsg && (
-          <div role="alert" className="p-3.5 rounded-lg border border-red-200 bg-red-50 text-xs font-medium text-red-800">
-            {errorMsg}
+        {(errorMsg || storageError) && (
+          <div role="alert" className="p-3.5 rounded-lg border border-red-200 bg-red-50 text-xs font-medium text-red-800 space-y-2">
+            <p>{errorMsg || storageError}</p>
+            {storageError && !errorMsg && (
+              <button
+                type="button"
+                onClick={onRetryStatus}
+                className="underline font-semibold text-red-900"
+              >
+                Tentar reconectar agora
+              </button>
+            )}
           </div>
         )}
 
