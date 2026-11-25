@@ -1,5 +1,5 @@
 import type { InventoryItem } from '../types/inventory';
-import { calculateDaysUntilExpiry, getExpiryStatus } from './analytics';
+import { calculateDaysUntilExpiry, getExpiryStatus, hasValidExpiryDate } from './analytics';
 
 export type PushSupportState = 'granted' | 'denied' | 'default' | 'unsupported';
 
@@ -78,7 +78,7 @@ export function buildExpiryAlertMessage(
   criticalDays: number
 ): { count: number; title: string; body: string } | null {
   const expiring = inventory
-    .filter((item) => item.quantity > 0)
+    .filter((item) => item.quantity > 0 && hasValidExpiryDate(item.expiryDate))
     .map((item) => ({
       item,
       days: calculateDaysUntilExpiry(item.expiryDate),

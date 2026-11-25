@@ -1,4 +1,6 @@
 export type CategoryId =
+  | 'Hortifruti & Feira'
+  | 'Padaria & Laticínios'
   | 'Grãos & Secos'
   | 'Proteínas & Enlatados'
   | 'Água & Bebidas'
@@ -8,6 +10,8 @@ export type CategoryId =
   | 'Outros';
 
 export const CATEGORIES: CategoryId[] = [
+  'Hortifruti & Feira',
+  'Padaria & Laticínios',
   'Grãos & Secos',
   'Proteínas & Enlatados',
   'Água & Bebidas',
@@ -17,7 +21,7 @@ export const CATEGORIES: CategoryId[] = [
   'Outros',
 ];
 
-export type ExpiryStatus = 'expired' | 'critical' | 'warning' | 'ok';
+export type ExpiryStatus = 'expired' | 'critical' | 'warning' | 'ok' | 'none';
 
 export type PriceSignal = 'ideal_to_stock' | 'stable' | 'above_average';
 
@@ -31,10 +35,12 @@ export interface InventoryItem {
   unitPrice: number;
   referencePrice: number;
   purchaseDate: string; // YYYY-MM-DD
-  expiryDate: string;   // YYYY-MM-DD
+  insertedAt?: string;  // YYYY-MM-DD (data em que foi lançado no app)
+  expiryDate: string;   // YYYY-MM-DD ou '' quando não informado
   storeName: string;
   receiptId?: string;
-  dailyConsumptionRate?: number; // optional units per day for survivalist autonomy
+  isStockpile: boolean; // true = Despensa Estocada (reserva), false = Despensa Rotineira (uso diário/feira)
+  dailyConsumptionRate?: number;
 }
 
 export interface PriceRecord {
@@ -47,8 +53,10 @@ export interface PriceRecord {
   referencePrice: number;
   quantity: number;
   purchaseDate: string; // YYYY-MM-DD
+  insertedAt?: string;  // YYYY-MM-DD
   storeName: string;
   receiptId?: string;
+  isStockpile?: boolean;
 }
 
 export interface ReceiptItemSummary {
@@ -60,20 +68,22 @@ export interface ReceiptItemSummary {
   unitPrice: number;
   referencePrice: number;
   totalPrice: number;
-  expiryDate: string;
+  expiryDate: string; // YYYY-MM-DD ou ''
+  isStockpile?: boolean;
 }
 
 export interface ReceiptRecord {
   id: string;
   storeName: string;
-  purchaseDate: string; // YYYY-MM-DD
+  purchaseDate: string; // YYYY-MM-DD (data real da compra)
   totalPaid: number;
   totalReference: number;
   netSavings: number;
   itemCount: number;
   source: 'ocr_photo' | 'local_text' | 'demo_seed';
   items: ReceiptItemSummary[];
-  createdAt: string;
+  createdAt: string;    // YYYY-MM-DD (data de inserção)
+  insertedAt?: string;  // YYYY-MM-DD (alias explícito para data de inserção)
 }
 
 export interface ParsedDraftItem {
@@ -84,14 +94,17 @@ export interface ParsedDraftItem {
   unit: string;
   unitPrice: number;
   referencePrice: number;
-  expiryDate: string;
+  expiryDate: string; // Inicia sempre vazio (''), preenchido apenas sob demanda ou manualmente
+  isStockpile: boolean;
+  suggestedShelfLifeDays?: number;
 }
 
 export interface AlertSettings {
   pushEnabled: boolean;
-  warningDays: number; // e.g. 30 days before expiration
-  criticalDays: number; // e.g. 7 days before expiration
-  householdSize: number; // for survivalist reserve days calculation
+  warningDays: number;        // e.g. 30 days before expiration
+  criticalDays: number;       // e.g. 7 days before expiration
+  householdSize: number;      // pessoas na casa
+  dailyCostPerPerson: number; // custo diário estimado por pessoa (R$) para autonomia por valor investido
 }
 
 export interface AppState {
@@ -135,8 +148,82 @@ export interface DashboardKpis {
   totalStockValue: number;
   totalUnits: number;
   uniqueProductsCount: number;
+  // Separação Despensa Estocada vs Rotineira
+  stockpileValue: number;
+  stockpileUnits: number;
+  stockpileProductsCount: number;
+  routineValue: number;
+  routineUnits: number;
+  routineProductsCount: number;
+  // Alertas
   expiringSoonCount: number;
   expiredCount: number;
   belowAverageSharePct: number;
-  survivalReserveDays: number;
+  // Autonomia calculada APENAS sobre itens estocados (isStockpile === true)
+  survivalReserveDays: number;   // por volume alimentar estocado
+  survivalDaysByBudget: number;  // pelo valor investido / (pessoas * custo diário)
+}
+
+export interface MonthlyCategoryComparison {
+  category: CategoryId;
+  currentSpent: number;
+  stockpileSpent: number;
+  routineSpent: number;
+  currentReference: number;
+  netSavings: number;
+  compareSpent: number;
+  diffAmount: number;
+  diffPercent: number | null;
+  itemCount: number;
+}
+
+export interface MonthlyReportItem {
+  id: string;
+  name: string;
+  category: CategoryId;
+  quantity: number;
+  unit: string;
+  unitPrice: number;
+  referencePrice: number;
+  totalPaid: number;
+  netSavings: number;
+  purchaseDate: string;
+  storeName: string;
+  isStockpile: boolean;
+}
+
+export interface MonthlySeriesPoint {
+  monthKey: string; // YYYY-MM
+  label: string;    // ex: Nov/26
+  stockpileSpent: number;
+  routineSpent: number;
+  totalSpent: number;
+  netSavings: number;
+}
+
+export interface MonthlyReportSummary {
+  monthKey: string;
+  compareMonthKey: string;
+  totalSpent: number;
+  stockpileSpent: number;
+  routineSpent: number;
+  stockpileSharePct: number;
+  routineSharePct: number;
+  totalReference: number;
+  netSavings: number;
+  savingsPercent: number;
+  compareTotalSpent: number;
+  compareDiffAmount: number;
+  compareDiffPercent: number | null;
+  receiptCount: number;
+  itemCount: number;
+  categories: MonthlyCategoryComparison[];
+  items: MonthlyReportItem[];
+}
+
+export interface SharedMonthlyReportPayload {
+  version: 1;
+  generatedAt: string;
+  report: MonthlyReportSummary;
+  series: MonthlySeriesPoint[];
 }

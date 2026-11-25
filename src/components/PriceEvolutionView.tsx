@@ -1,7 +1,14 @@
 import { useEffect, useState } from 'react';
-import { ArrowDownRight, ArrowUpRight, ShieldCheck, TrendingDown } from 'lucide-react';
+import {
+  Archive,
+  ArrowDownRight,
+  ArrowUpRight,
+  ShieldCheck,
+  ShoppingBasket,
+  TrendingDown,
+} from 'lucide-react';
 import type { PriceTrendAnalysis } from '../types/inventory';
-import { formatBRL, formatDateBR } from '../utils/analytics';
+import { defaultIsStockpileForCategory, formatBRL, formatDateBR } from '../utils/analytics';
 
 interface PriceEvolutionViewProps {
   trends: PriceTrendAnalysis[];
@@ -15,10 +22,19 @@ export function PriceEvolutionView({
   onSelectProduct,
 }: PriceEvolutionViewProps) {
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
+  const [destFilter, setDestFilter] = useState<'all' | 'stockpile' | 'routine'>('all');
+
+  const filteredTrends = trends.filter((t) => {
+    if (destFilter === 'all') return true;
+    const latest = t.records[t.records.length - 1];
+    const isStockpile = latest?.isStockpile ?? defaultIsStockpileForCategory(t.category);
+    return destFilter === 'stockpile' ? isStockpile : !isStockpile;
+  });
 
   const activeTrend =
-    trends.find((t) => t.productKey === selectedProductKey) ??
-    trends.find((t) => t.records.length >= 2) ??
+    filteredTrends.find((t) => t.productKey === selectedProductKey) ??
+    filteredTrends.find((t) => t.records.length >= 2) ??
+    filteredTrends[0] ??
     trends[0] ??
     null;
 
@@ -33,7 +49,7 @@ export function PriceEvolutionView({
           Nenhum histórico de preços ainda
         </h1>
         <p className="mt-2 text-sm text-slate-600">
-          Suba seu primeiro cupom fiscal para começar a acompanhar a evolução ou regressão de preços.
+          Suba seu primeiro cupom fiscal para começar a acompanhar se está comprando bem ou pagando mais caro.
         </p>
       </div>
     );
@@ -79,13 +95,45 @@ export function PriceEvolutionView({
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight text-slate-900">
-          Evolução e Regressão de Preços
-        </h1>
-        <p className="mt-1 text-sm text-slate-600">
-          Compare a curva histórica por produto para identificar inflação ou janelas de compra para estocagem.
-        </p>
+      <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900">
+            Evolução de Preços: Feira &amp; Estocagem
+          </h1>
+          <p className="mt-1 text-sm text-slate-600">
+            Compare o histórico de cada item para saber se comprou bem (abaixo da média) ou pagou mais caro.
+          </p>
+        </div>
+
+        <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg self-start">
+          <button
+            type="button"
+            onClick={() => setDestFilter('all')}
+            className={`px-3 py-1.5 text-xs font-medium rounded-md ${
+              destFilter === 'all' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
+            }`}
+          >
+            Todos ({trends.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => setDestFilter('stockpile')}
+            className={`px-3 py-1.5 text-xs font-medium rounded-md ${
+              destFilter === 'stockpile' ? 'bg-emerald-700 text-white' : 'text-slate-600'
+            }`}
+          >
+            Estocada
+          </button>
+          <button
+            type="button"
+            onClick={() => setDestFilter('routine')}
+            className={`px-3 py-1.5 text-xs font-medium rounded-md ${
+              destFilter === 'routine' ? 'bg-amber-600 text-white' : 'text-slate-600'
+            }`}
+          >
+            Rotineira
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
@@ -93,11 +141,11 @@ export function PriceEvolutionView({
         <aside className="lg:col-span-4 bg-white border border-slate-200 rounded-xl overflow-hidden">
           <div className="px-4 py-3 border-b border-slate-100 bg-slate-50/70">
             <h2 className="text-xs font-semibold text-slate-700">
-              Produtos Catalogados ({trends.length})
+              Produtos Catalogados ({filteredTrends.length})
             </h2>
           </div>
-          <ul className="divide-y divide-slate-100 max-h-[520px] overflow-y-auto">
-            {trends.map((trend) => {
+          <ul className="divide-y divide-slate-100 max-h-[540px] overflow-y-auto">
+            {filteredTrends.map((trend) => {
               const isSelected = trend.productKey === activeTrend.productKey;
               const isDown = trend.changeVsAveragePct <= -5;
               const isUp = trend.changeVsAveragePct >= 5;
@@ -159,16 +207,16 @@ export function PriceEvolutionView({
                 {activeTrend.signal === 'ideal_to_stock' ? (
                   <span className="inline-flex items-center gap-1.5 text-sm font-semibold text-emerald-700">
                     <ShieldCheck className="w-4 h-4" aria-hidden="true" />
-                    <span>Ideal para Estocar (Abaixo da Média)</span>
+                    <span>Comprou Bem (Abaixo da Média)</span>
                   </span>
                 ) : activeTrend.signal === 'above_average' ? (
                   <span className="inline-flex items-center gap-1.5 text-sm font-semibold text-red-700">
                     <ArrowUpRight className="w-4 h-4" aria-hidden="true" />
-                    <span>Acima da Média Histórica</span>
+                    <span>Pagou Mais Caro que a Média</span>
                   </span>
                 ) : (
                   <span className="text-sm font-medium text-slate-600">
-                    Preço dentro da faixa estável
+                    Preço estável na média histórica
                   </span>
                 )}
                 <p className="text-xs text-slate-500 mt-0.5 font-mono tabular-nums">
@@ -237,7 +285,7 @@ export function PriceEvolutionView({
 
             {/* Interactive SVG Price Chart */}
             <div className="pt-5">
-              <div className="flex items-center justify-between text-xs text-slate-500 mb-2">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500 mb-2">
                 <span>
                   Ponto selecionado: <strong className="text-slate-900">{formatDateBR(activePoint.purchaseDate)}</strong> · {activePoint.storeName} ·{' '}
                   <strong className="font-mono tabular-nums text-slate-900">
@@ -254,7 +302,6 @@ export function PriceEvolutionView({
                   role="img"
                   aria-label={`Gráfico de evolução de preços para ${activeTrend.productName}`}
                 >
-                  {/* Grid lines */}
                   {[0, 0.5, 1].map((t) => {
                     const y = padTop + plotH - t * plotH;
                     const val = minY + t * spanY;
@@ -280,7 +327,6 @@ export function PriceEvolutionView({
                     );
                   })}
 
-                  {/* Average reference line */}
                   <line
                     x1={padLeft}
                     y1={avgY}
@@ -291,7 +337,6 @@ export function PriceEvolutionView({
                     strokeWidth="1.5"
                   />
 
-                  {/* Price curve */}
                   {records.length > 1 && (
                     <polyline
                       fill="none"
@@ -303,7 +348,6 @@ export function PriceEvolutionView({
                     />
                   )}
 
-                  {/* Interactive Data Points */}
                   {records.map((rec, i) => {
                     const cx = getX(i);
                     const cy = getY(rec.unitPrice);
@@ -350,31 +394,57 @@ export function PriceEvolutionView({
               <table className="w-full text-left border-collapse">
                 <thead>
                   <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-medium text-slate-500">
-                    <th className="py-2.5 px-6">Data</th>
+                    <th className="py-2.5 px-6">Data Compra</th>
                     <th className="py-2.5 px-4">Estabelecimento</th>
+                    <th className="py-2.5 px-4">Destino</th>
                     <th className="py-2.5 px-4 text-right">Quantidade</th>
                     <th className="py-2.5 px-4 text-right">Preço Unit.</th>
                     <th className="py-2.5 px-6 text-right">Ref. na Data</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 text-sm">
-                  {[...records].reverse().map((rec) => (
-                    <tr key={rec.id} className="hover:bg-slate-50/70">
-                      <td className="py-3 px-6 font-mono tabular-nums text-xs text-slate-700">
-                        {formatDateBR(rec.purchaseDate)}
-                      </td>
-                      <td className="py-3 px-4 text-slate-900">{rec.storeName}</td>
-                      <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-700">
-                        {rec.quantity} {rec.unit}
-                      </td>
-                      <td className="py-3 px-4 text-right font-mono tabular-nums font-medium text-slate-900">
-                        {formatBRL(rec.unitPrice)}
-                      </td>
-                      <td className="py-3 px-6 text-right font-mono tabular-nums text-slate-500">
-                        {formatBRL(rec.referencePrice)}
-                      </td>
-                    </tr>
-                  ))}
+                  {[...records].reverse().map((rec) => {
+                    const isStock =
+                      rec.isStockpile ?? defaultIsStockpileForCategory(rec.category);
+                    return (
+                      <tr key={rec.id} className="hover:bg-slate-50/70">
+                        <td className="py-3 px-6 font-mono tabular-nums text-xs text-slate-700">
+                          {formatDateBR(rec.purchaseDate)}
+                        </td>
+                        <td className="py-3 px-4 text-slate-900">{rec.storeName}</td>
+                        <td className="py-3 px-4 whitespace-nowrap">
+                          <span
+                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium ${
+                              isStock
+                                ? 'bg-emerald-50 text-emerald-800'
+                                : 'bg-amber-50 text-amber-800'
+                            }`}
+                          >
+                            {isStock ? (
+                              <>
+                                <Archive className="w-3 h-3" aria-hidden="true" />
+                                <span>Estocada</span>
+                              </>
+                            ) : (
+                              <>
+                                <ShoppingBasket className="w-3 h-3" aria-hidden="true" />
+                                <span>Rotineira</span>
+                              </>
+                            )}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-700">
+                          {rec.quantity} {rec.unit}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono tabular-nums font-medium text-slate-900">
+                          {formatBRL(rec.unitPrice)}
+                        </td>
+                        <td className="py-3 px-6 text-right font-mono tabular-nums text-slate-500">
+                          {formatBRL(rec.referencePrice)}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

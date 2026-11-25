@@ -1,9 +1,13 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   AlertTriangle,
+  Archive,
   Minus,
   Plus,
   Search,
+  ShieldCheck,
+  ShoppingBasket,
+  Sparkles,
   Trash2,
 } from 'lucide-react';
 import {
@@ -15,17 +19,27 @@ import {
 import {
   addDaysToIso,
   calculateDaysUntilExpiry,
+  calculateStockpileAutonomy,
+  defaultIsStockpileForCategory,
   formatBRL,
   formatDateBR,
   getExpiryStatus,
+  hasValidExpiryDate,
+  inferShelfLifeDays,
 } from '../utils/analytics';
+
+export type PantryScope = 'all' | 'stockpile' | 'routine';
 
 interface InventoryViewProps {
   inventory: InventoryItem[];
   warningDays: number;
   criticalDays: number;
+  householdSize: number;
+  dailyCostPerPerson: number;
   initialCategoryFilter: CategoryId | 'Todas';
+  initialPantryScope?: PantryScope;
   onUpdateQuantity: (id: string, delta: number) => void;
+  onToggleStockpile: (id: string) => void;
   onDeleteItem: (id: string) => void;
   onAddManualItem: (item: {
     name: string;
@@ -34,8 +48,10 @@ interface InventoryViewProps {
     unit: string;
     unitPrice: number;
     referencePrice: number;
+    purchaseDate: string;
     expiryDate: string;
     storeName: string;
+    isStockpile: boolean;
   }) => void;
 }
 
@@ -43,17 +59,30 @@ export function InventoryView({
   inventory,
   warningDays,
   criticalDays,
+  householdSize,
+  dailyCostPerPerson,
   initialCategoryFilter,
+  initialPantryScope = 'all',
   onUpdateQuantity,
+  onToggleStockpile,
   onDeleteItem,
   onAddManualItem,
 }: InventoryViewProps) {
+  const [pantryScope, setPantryScope] = useState<PantryScope>(initialPantryScope);
   const [searchQuery, setSearchQuery] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<CategoryId | 'Todas'>(
     initialCategoryFilter
   );
   const [statusFilter, setStatusFilter] = useState<'all' | 'expiring' | 'expired'>('all');
   const [showAddForm, setShowAddForm] = useState(false);
+
+  useEffect(() => {
+    setCategoryFilter(initialCategoryFilter);
+  }, [initialCategoryFilter]);
+
+  useEffect(() => {
+    setPantryScope(initialPantryScope);
+  }, [initialPantryScope]);
 
   const todayIso = new Date().toISOString().slice(0, 10);
   const [manualName, setManualName] = useState('');
@@ -62,14 +91,35 @@ export function InventoryView({
   const [manualUnit, setManualUnit] = useState('pct');
   const [manualPrice, setManualPrice] = useState('');
   const [manualRefPrice, setManualRefPrice] = useState('');
-  const [manualExpiry, setManualExpiry] = useState(addDaysToIso(todayIso, 365));
+  const [manualPurchaseDate, setManualPurchaseDate] = useState(todayIso);
+  // Validade inicia SEMPRE vazia ('') no cadastro manual
+  const [manualExpiry, setManualExpiry] = useState('');
   const [manualStore, setManualStore] = useState('Compra Local');
+  const [manualIsStockpile, setManualIsStockpile] = useState(true);
   const [formError, setFormError] = useState<string | null>(null);
 
   const activeItems = inventory.filter((item) => item.quantity > 0);
+  const stockpileItems = activeItems.filter((item) => item.isStockpile);
+  const routineItems = activeItems.filter((item) => !item.isStockpile);
+
+  const autonomy = calculateStockpileAutonomy(
+    activeItems,
+    householdSize,
+    dailyCostPerPerson
+  );
+  const routineValue = Number(
+    routineItems
+      .reduce((acc, item) => acc + item.quantity * item.unitPrice, 0)
+      .toFixed(2)
+  );
+  const routineUnits = Number(
+    routineItems.reduce((acc, item) => acc + item.quantity, 0).toFixed(1)
+  );
 
   const filteredItems = activeItems
     .filter((item) => {
+      if (pantryScope === 'stockpile' && !item.isStockpile) return false;
+      if (pantryScope === 'routine' && item.isStockpile) return false;
       if (categoryFilter !== 'Todas' && item.category !== categoryFilter) {
         return false;
       }
@@ -91,7 +141,25 @@ export function InventoryView({
       }
       return true;
     })
-    .sort((a, b) => a.expiryDate.localeCompare(b.expiryDate));
+    .sort((a, b) => {
+      const aHas = hasValidExpiryDate(a.expiryDate);
+      const bHas = hasValidExpiryDate(b.expiryDate);
+      if (aHas && bHas) return a.expiryDate.localeCompare(b.expiryDate);
+      if (aHas) return -1;
+      if (bHas) return 1;
+      return b.purchaseDate.localeCompare(a.purchaseDate);
+    });
+
+  function handleManualCategoryChange(nextCat: CategoryId) {
+    setManualCategory(nextCat);
+    setManualIsStockpile(defaultIsStockpileForCategory(nextCat));
+  }
+
+  function handleSuggestManualExpiry() {
+    const base = manualPurchaseDate || todayIso;
+    const days = inferShelfLifeDays(manualCategory);
+    setManualExpiry(addDaysToIso(base, days));
+  }
 
   function handleManualSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -118,16 +186,22 @@ export function InventoryView({
       unit: manualUnit.trim() || 'un',
       unitPrice: price,
       referencePrice: Number.isFinite(refPrice) && refPrice > 0 ? refPrice : price,
-      expiryDate: manualExpiry || addDaysToIso(todayIso, 365),
+      purchaseDate: manualPurchaseDate || todayIso,
+      expiryDate: manualExpiry.trim(), // Pode ficar vazio ('') sem gerar falso alerta
       storeName: manualStore.trim() || 'Compra Local',
+      isStockpile: manualIsStockpile,
     });
     setManualName('');
     setManualPrice('');
     setManualRefPrice('');
+    setManualExpiry('');
     setShowAddForm(false);
   }
 
   function renderStatusLabel(status: ExpiryStatus, days: number) {
+    if (status === 'none') {
+      return <span className="text-xs text-slate-400">Sem validade</span>;
+    }
     if (status === 'expired') {
       return (
         <span className="inline-flex items-center gap-1 text-xs font-medium text-red-700 font-mono tabular-nums">
@@ -164,10 +238,10 @@ export function InventoryView({
       <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-slate-900">
-            Estoque Doméstico e Validade
+            Despensa Rotineira &amp; Despensa Estocada
           </h1>
           <p className="mt-1 text-sm text-slate-600">
-            Ordenado por data de validade mais próxima (PEPS — Primeiro que Expira, Primeiro que Sai).
+            Separe o uso diário/feira da reserva estocada. Alterne qualquer item entre Estocada e Rotineira com 1 clique.
           </p>
         </div>
 
@@ -181,19 +255,144 @@ export function InventoryView({
         </button>
       </div>
 
+      {/* Two Separate Pantry Controls */}
+      <section aria-label="Controles separados de despensa" className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* Despensa Estocada */}
+        <button
+          type="button"
+          onClick={() =>
+            setPantryScope((prev) => (prev === 'stockpile' ? 'all' : 'stockpile'))
+          }
+          className={`text-left rounded-xl p-5 border transition-all ${
+            pantryScope === 'stockpile'
+              ? 'bg-emerald-50/70 border-emerald-500 ring-2 ring-emerald-200'
+              : 'bg-white border-emerald-200 hover:border-emerald-400'
+          }`}
+        >
+          <div className="flex items-center justify-between gap-3">
+            <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-800 bg-emerald-100/80 px-2.5 py-0.5 rounded-full">
+              <Archive className="w-3.5 h-3.5" aria-hidden="true" />
+              <span>Despensa Estocada (Reserva)</span>
+            </span>
+            <span className="text-xs font-medium text-emerald-700">
+              {pantryScope === 'stockpile' ? 'Filtro ativo (clique p/ ver todos)' : 'Filtrar reserva →'}
+            </span>
+          </div>
+
+          <div className="mt-3 flex flex-wrap items-baseline justify-between gap-2">
+            <div>
+              <span className="text-2xl font-bold font-mono tabular-nums text-slate-900">
+                {formatBRL(autonomy.stockpileValue)}
+              </span>
+              <span className="ml-2 text-xs font-mono tabular-nums text-slate-500">
+                {stockpileItems.length} lotes · {autonomy.stockpileUnits} un.
+              </span>
+            </div>
+          </div>
+
+          <div className="mt-3 pt-3 border-t border-emerald-200/70 grid grid-cols-2 gap-3 text-xs">
+            <div className="flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-emerald-700 shrink-0" aria-hidden="true" />
+              <div>
+                <p className="text-slate-500">Autonomia (volume)</p>
+                <p className="font-bold font-mono tabular-nums text-emerald-800">
+                  {autonomy.survivalReserveDays} dias
+                </p>
+              </div>
+            </div>
+            <div>
+              <p className="text-slate-500">
+                Autonomia (valor · {householdSize}p × {formatBRL(dailyCostPerPerson)}/d)
+              </p>
+              <p className="font-bold font-mono tabular-nums text-emerald-800">
+                {autonomy.survivalDaysByBudget} dias
+              </p>
+            </div>
+          </div>
+        </button>
+
+        {/* Despensa Rotineira */}
+        <button
+          type="button"
+          onClick={() =>
+            setPantryScope((prev) => (prev === 'routine' ? 'all' : 'routine'))
+          }
+          className={`text-left rounded-xl p-5 border transition-all ${
+            pantryScope === 'routine'
+              ? 'bg-amber-50/70 border-amber-500 ring-2 ring-amber-200'
+              : 'bg-white border-slate-200 hover:border-amber-300'
+          }`}
+        >
+          <div className="flex items-center justify-between gap-3">
+            <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-amber-800 bg-amber-100/80 px-2.5 py-0.5 rounded-full">
+              <ShoppingBasket className="w-3.5 h-3.5" aria-hidden="true" />
+              <span>Despensa Rotineira (Uso Diário / Feira)</span>
+            </span>
+            <span className="text-xs font-medium text-amber-800">
+              {pantryScope === 'routine' ? 'Filtro ativo (clique p/ ver todos)' : 'Filtrar uso diário →'}
+            </span>
+          </div>
+
+          <div className="mt-3 flex flex-wrap items-baseline justify-between gap-2">
+            <div>
+              <span className="text-2xl font-bold font-mono tabular-nums text-slate-900">
+                {formatBRL(routineValue)}
+              </span>
+              <span className="ml-2 text-xs font-mono tabular-nums text-slate-500">
+                {routineItems.length} lotes · {routineUnits} un.
+              </span>
+            </div>
+          </div>
+
+          <div className="mt-3 pt-3 border-t border-slate-100 text-xs text-slate-600">
+            Itens de giro rápido (hortifruti, padaria, laticínios e consumo da semana). Não entram na previsão de dias de sobrevivência da reserva.
+          </div>
+        </button>
+      </section>
+
       {showAddForm && (
         <form
           onSubmit={handleManualSubmit}
           className="bg-white border border-slate-200 rounded-xl p-5 space-y-4"
         >
-          <h2 className="text-sm font-semibold text-slate-900">
-            Novo Item Manual no Estoque
-          </h2>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-sm font-semibold text-slate-900">
+              Novo Item Manual na Despensa
+            </h2>
+            <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg text-xs">
+              <button
+                type="button"
+                onClick={() => setManualIsStockpile(true)}
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md font-medium ${
+                  manualIsStockpile
+                    ? 'bg-emerald-700 text-white'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <Archive className="w-3.5 h-3.5" aria-hidden="true" />
+                <span>Estocar (Reserva)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setManualIsStockpile(false)}
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md font-medium ${
+                  !manualIsStockpile
+                    ? 'bg-amber-600 text-white'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <ShoppingBasket className="w-3.5 h-3.5" aria-hidden="true" />
+                <span>Rotineira (Uso Diário)</span>
+              </button>
+            </div>
+          </div>
+
           {formError && (
             <p role="alert" className="text-xs font-medium text-red-700">
               {formError}
             </p>
           )}
+
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <div>
               <label htmlFor="manual-name" className="block text-xs font-medium text-slate-700 mb-1">
@@ -204,7 +403,7 @@ export function InventoryView({
                 type="text"
                 value={manualName}
                 onChange={(e) => setManualName(e.target.value)}
-                placeholder="Ex: Feijão Preto 1kg"
+                placeholder="Ex: Feijão Preto 1kg ou Tomate kg"
                 className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 text-slate-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700"
               />
             </div>
@@ -216,7 +415,7 @@ export function InventoryView({
               <select
                 id="manual-cat"
                 value={manualCategory}
-                onChange={(e) => setManualCategory(e.target.value as CategoryId)}
+                onChange={(e) => handleManualCategoryChange(e.target.value as CategoryId)}
                 className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 text-slate-900 bg-white focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700"
               >
                 {CATEGORIES.map((c) => (
@@ -290,9 +489,32 @@ export function InventoryView({
             </div>
 
             <div>
-              <label htmlFor="manual-expiry" className="block text-xs font-medium text-slate-700 mb-1">
-                Data de Validade
+              <label htmlFor="manual-purchase-date" className="block text-xs font-medium text-slate-700 mb-1">
+                Data da Compra
               </label>
+              <input
+                id="manual-purchase-date"
+                type="date"
+                value={manualPurchaseDate}
+                onChange={(e) => setManualPurchaseDate(e.target.value)}
+                className="w-full text-sm font-mono tabular-nums border border-slate-200 rounded-lg px-3 py-2 text-slate-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700"
+              />
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label htmlFor="manual-expiry" className="block text-xs font-medium text-slate-700">
+                  Validade (opcional)
+                </label>
+                <button
+                  type="button"
+                  onClick={handleSuggestManualExpiry}
+                  className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 hover:text-emerald-800"
+                >
+                  <Sparkles className="w-3 h-3" aria-hidden="true" />
+                  <span>Sugerir</span>
+                </button>
+              </div>
               <input
                 id="manual-expiry"
                 type="date"
@@ -304,7 +526,7 @@ export function InventoryView({
 
             <div>
               <label htmlFor="manual-store" className="block text-xs font-medium text-slate-700 mb-1">
-                Mercado
+                Mercado / Feira
               </label>
               <input
                 id="manual-store"
@@ -315,7 +537,7 @@ export function InventoryView({
               />
             </div>
 
-            <div className="sm:col-span-2 flex items-end justify-end gap-3">
+            <div className="flex items-end justify-end gap-3">
               <button
                 type="button"
                 onClick={() => setShowAddForm(false)}
@@ -327,7 +549,7 @@ export function InventoryView({
                 type="submit"
                 className="px-4 py-2 text-sm font-medium text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg"
               >
-                Salvar no Estoque
+                Salvar
               </button>
             </div>
           </div>
@@ -355,30 +577,66 @@ export function InventoryView({
           <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg">
             <button
               type="button"
+              onClick={() => setPantryScope('all')}
+              className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+                pantryScope === 'all'
+                  ? 'bg-white text-slate-900 shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Todas ({activeItems.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => setPantryScope('stockpile')}
+              className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+                pantryScope === 'stockpile'
+                  ? 'bg-emerald-700 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Estocada ({stockpileItems.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => setPantryScope('routine')}
+              className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+                pantryScope === 'routine'
+                  ? 'bg-amber-600 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Rotineira ({routineItems.length})
+            </button>
+          </div>
+
+          <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg">
+            <button
+              type="button"
               onClick={() => setStatusFilter('all')}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+              className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
                 statusFilter === 'all'
                   ? 'bg-white text-slate-900 shadow-xs'
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              Todos ({activeItems.length})
+              Todos prazos
             </button>
             <button
               type="button"
               onClick={() => setStatusFilter('expiring')}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+              className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
                 statusFilter === 'expiring'
                   ? 'bg-white text-slate-900 shadow-xs'
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              Vencendo em breve
+              Vencendo
             </button>
             <button
               type="button"
               onClick={() => setStatusFilter('expired')}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+              className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
                 statusFilter === 'expired'
                   ? 'bg-white text-slate-900 shadow-xs'
                   : 'text-slate-600 hover:text-slate-900'
@@ -415,7 +673,7 @@ export function InventoryView({
               Nenhum item encontrado com os filtros atuais.
             </p>
             <p className="mt-1 text-xs text-slate-500">
-              Ajuste os filtros ou escaneie um novo cupom fiscal para abastecer o estoque.
+              Ajuste os filtros ou escaneie um novo cupom fiscal para abastecer sua despensa.
             </p>
           </div>
         ) : (
@@ -425,6 +683,7 @@ export function InventoryView({
                 <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-medium text-slate-500">
                   <th className="py-3 px-6">Produto / Origem</th>
                   <th className="py-3 px-4">Categoria</th>
+                  <th className="py-3 px-4">Destino (1 clique)</th>
                   <th className="py-3 px-4 text-right">Qtd Atual</th>
                   <th className="py-3 px-4 text-right">Custo Unit.</th>
                   <th className="py-3 px-4">Validade</th>
@@ -449,19 +708,47 @@ export function InventoryView({
                       <td className="py-3.5 px-4 text-xs text-slate-600 whitespace-nowrap">
                         {item.category}
                       </td>
+                      <td className="py-3.5 px-4 whitespace-nowrap">
+                        <button
+                          type="button"
+                          onClick={() => onToggleStockpile(item.id)}
+                          title="Clique para mover entre Despensa Estocada e Despensa Rotineira"
+                          className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+                            item.isStockpile
+                              ? 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
+                              : 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100'
+                          }`}
+                        >
+                          {item.isStockpile ? (
+                            <>
+                              <Archive className="w-3 h-3" aria-hidden="true" />
+                              <span>Estocada</span>
+                            </>
+                          ) : (
+                            <>
+                              <ShoppingBasket className="w-3 h-3" aria-hidden="true" />
+                              <span>Rotineira</span>
+                            </>
+                          )}
+                        </button>
+                      </td>
                       <td className="py-3.5 px-4 text-right font-mono tabular-nums font-medium text-slate-900 whitespace-nowrap">
                         {item.quantity} {item.unit}
                       </td>
                       <td className="py-3.5 px-4 text-right font-mono tabular-nums whitespace-nowrap">
                         <span className="text-slate-900">{formatBRL(item.unitPrice)}</span>
-                        {unitSavings > 0.05 && (
+                        {unitSavings > 0.05 ? (
                           <span className="block text-xs text-emerald-700">
                             -{formatBRL(unitSavings)} vs ref.
                           </span>
-                        )}
+                        ) : unitSavings < -0.05 ? (
+                          <span className="block text-xs text-red-700">
+                            +{formatBRL(Math.abs(unitSavings))} vs ref.
+                          </span>
+                        ) : null}
                       </td>
                       <td className="py-3.5 px-4 font-mono tabular-nums text-xs text-slate-700 whitespace-nowrap">
-                        {formatDateBR(item.expiryDate)}
+                        {hasValidExpiryDate(item.expiryDate) ? formatDateBR(item.expiryDate) : '—'}
                       </td>
                       <td className="py-3.5 px-4 whitespace-nowrap">
                         {renderStatusLabel(status, days)}

@@ -11,6 +11,8 @@ const PORT = Number(process.env.PORT || 3000);
 const isProduction = process.env.NODE_ENV === 'production';
 
 const VALID_CATEGORIES = [
+  'Hortifruti & Feira',
+  'Padaria & Laticínios',
   'Grãos & Secos',
   'Proteínas & Enlatados',
   'Água & Bebidas',
@@ -25,15 +27,32 @@ async function startServer() {
   app.use(express.json({ limit: '15mb' }));
 
   app.get('/api/health', (_req, res) => {
-    res.json({ status: 'ok', localFirst: true });
+    const apiKey = process.env.GEMINI_API_KEY;
+    const ocrConfigured = Boolean(
+      apiKey &&
+        apiKey.trim().length > 10 &&
+        apiKey !== 'MY_GEMINI_API_KEY' &&
+        !apiKey.includes('COLE_SUA_CHAVE')
+    );
+    res.json({
+      status: 'ok',
+      localFirst: true,
+      ocrConfigured,
+      model: 'gemini-2.5-flash',
+    });
   });
 
   app.post('/api/parse-receipt', async (req, res) => {
     try {
       const apiKey = process.env.GEMINI_API_KEY;
-      if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
+      if (
+        !apiKey ||
+        apiKey === 'MY_GEMINI_API_KEY' ||
+        apiKey.includes('COLE_SUA_CHAVE')
+      ) {
         res.status(503).json({
-          error: 'Chave Gemini API não configurada no servidor. Configure GEMINI_API_KEY nos Segredos do projeto ou use a importação de texto/cupom exemplo localmente.',
+          error:
+            'Chave Gemini API não configurada no servidor. Configure GEMINI_API_KEY nas variáveis de ambiente ou use a importação de texto/cupom exemplo localmente.',
         });
         return;
       }
@@ -52,35 +71,27 @@ async function startServer() {
       const cleanBase64 = imageBase64.includes(',')
         ? imageBase64.split(',')[1]
         : imageBase64;
-      const safeMimeType = mimeType && mimeType.startsWith('image/')
-        ? mimeType
-        : 'image/jpeg';
+      const safeMimeType =
+        mimeType && mimeType.startsWith('image/') ? mimeType : 'image/jpeg';
       const referenceDate = todayIso || new Date().toISOString().slice(0, 10);
 
-      const ai = new GoogleGenAI({
-        apiKey,
-        httpOptions: {
-          headers: {
-            'User-Agent': 'aistudio-build',
-          },
-        },
-      });
+      const ai = new GoogleGenAI({ apiKey });
 
       const prompt = [
-        'Você é um especialista em leitura de cupons fiscais brasileiros (NFC-e / SAT / Cupom Fiscal) e gestão de despensa/sobrevivencialismo.',
+        'Você é um especialista em leitura de cupons fiscais brasileiros (NFC-e / SAT / Cupom Fiscal) para controle de gastos de feira, despensa doméstica e estocagem.',
         `Data de referência de hoje: ${referenceDate}.`,
         'Analise a imagem do cupom fiscal enviada e extraia todos os produtos comprados com máxima precisão.',
         'Regras:',
         '1. Extraia o nome do estabelecimento e a data da compra no formato YYYY-MM-DD (se não visível, use a data de referência).',
         '2. Para cada item, forneça um nome limpo e legível em português (expanda abreviações comuns de cupom como "ARZ" -> "Arroz", "FJ" -> "Feijão", "OL" -> "Óleo", mantendo peso/volume como "5kg", "1L", "900ml").',
         `3. Classifique cada item em exatamente uma destas categorias: ${VALID_CATEGORIES.join(', ')}.`,
-        '4. Extraia quantidade (quantity), unidade (ex: un, kg, L, pct, lata, cx), preço unitário (unitPrice) e preço total do item (totalPrice).',
-        '5. Estime a validade típica de prateleira em dias (suggestedShelfLifeDays) para estocagem doméstica/sobrevivencialismo (ex: arroz/feijão ~ 365 dias, enlatados ~ 730 dias, óleo ~ 365 dias, água mineral ~ 365 dias, café ~ 365 dias, laticínios UHT ~ 120 dias, perecíveis frescos ~ 10 dias, higiene/limpeza ~ 1095 dias).',
-        '6. Estime um preço médio de referência de mercado (estimatedMarketPrice) apenas se não houver outro parâmetro, realista para supermercado brasileiro em Reais (BRL), ou igual ao unitPrice se incerto.',
+        '4. Extraia quantidade (quantity), unidade (ex: un, kg, L, pct, lata, cx, bdj), preço unitário (unitPrice) e preço total do item (totalPrice).',
+        '5. Estime a validade típica de prateleira em dias (suggestedShelfLifeDays) apenas como referência sob demanda (ex: hortifruti ~ 7 dias, padaria/laticínios ~ 14 dias, arroz/feijão ~ 365 dias, enlatados ~ 730 dias, óleo ~ 365 dias, água mineral ~ 365 dias, higiene/limpeza ~ 1095 dias).',
+        '6. Estime um preço médio de referência de mercado (estimatedMarketPrice) realista para supermercado brasileiro em Reais (BRL), ou igual ao unitPrice se incerto.',
       ].join('\n');
 
       const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
+        model: 'gemini-2.5-flash',
         contents: {
           parts: [
             {
@@ -108,7 +119,7 @@ async function startServer() {
                     name: { type: Type.STRING, description: 'Nome legível do produto com embalagem/peso' },
                     category: { type: Type.STRING, description: 'Uma das categorias válidas' },
                     quantity: { type: Type.NUMBER, description: 'Quantidade comprada' },
-                    unit: { type: Type.STRING, description: 'Unidade de medida (un, kg, L, pct, lata, cx)' },
+                    unit: { type: Type.STRING, description: 'Unidade de medida (un, kg, L, pct, lata, cx, bdj)' },
                     unitPrice: { type: Type.NUMBER, description: 'Preço unitário pago em BRL' },
                     totalPrice: { type: Type.NUMBER, description: 'Preço total da linha em BRL' },
                     suggestedShelfLifeDays: { type: Type.INTEGER, description: 'Dias estimados de validade na despensa' },

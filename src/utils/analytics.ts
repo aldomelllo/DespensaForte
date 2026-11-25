@@ -5,12 +5,46 @@ import {
   type DashboardKpis,
   type ExpiryStatus,
   type InventoryItem,
+  type MonthlyCategoryComparison,
+  type MonthlyReportItem,
+  type MonthlyReportSummary,
+  type MonthlySeriesPoint,
   type ParsedDraftItem,
   type PriceRecord,
   type PriceSignal,
   type PriceTrendAnalysis,
   type ReceiptRecord,
 } from '../types/inventory';
+
+const MONTH_NAMES_PT = [
+  'Janeiro',
+  'Fevereiro',
+  'Março',
+  'Abril',
+  'Maio',
+  'Junho',
+  'Julho',
+  'Agosto',
+  'Setembro',
+  'Outubro',
+  'Novembro',
+  'Dezembro',
+];
+
+const MONTH_SHORT_PT = [
+  'Jan',
+  'Fev',
+  'Mar',
+  'Abr',
+  'Mai',
+  'Jun',
+  'Jul',
+  'Ago',
+  'Set',
+  'Out',
+  'Nov',
+  'Dez',
+];
 
 export function normalizeProductKey(name: string): string {
   return name
@@ -30,13 +64,19 @@ export function addDaysToIso(isoDate: string, days: number): string {
   return dt.toISOString().slice(0, 10);
 }
 
+export function hasValidExpiryDate(expiryDate?: string | null): boolean {
+  if (!expiryDate || typeof expiryDate !== 'string') return false;
+  return /^\d{4}-\d{2}-\d{2}$/.test(expiryDate.trim());
+}
+
 export function calculateDaysUntilExpiry(
   expiryDate: string,
   referenceDate: string = new Date().toISOString().slice(0, 10)
 ): number {
+  if (!hasValidExpiryDate(expiryDate)) return Number.POSITIVE_INFINITY;
   const [ey, em, ed] = expiryDate.split('-').map(Number);
   const [ry, rm, rd] = referenceDate.split('-').map(Number);
-  if (!ey || !em || !ed || !ry || !rm || !rd) return 0;
+  if (!ey || !em || !ed || !ry || !rm || !rd) return Number.POSITIVE_INFINITY;
   const expUtc = Date.UTC(ey, em - 1, ed);
   const refUtc = Date.UTC(ry, rm - 1, rd);
   return Math.round((expUtc - refUtc) / 86_400_000);
@@ -48,11 +88,20 @@ export function getExpiryStatus(
   criticalDays: number = 7,
   referenceDate?: string
 ): ExpiryStatus {
+  if (!hasValidExpiryDate(expiryDate)) return 'none';
   const days = calculateDaysUntilExpiry(expiryDate, referenceDate);
+  if (!Number.isFinite(days)) return 'none';
   if (days < 0) return 'expired';
   if (days <= criticalDays) return 'critical';
   if (days <= warningDays) return 'warning';
   return 'ok';
+}
+
+export function defaultIsStockpileForCategory(category: CategoryId): boolean {
+  if (category === 'Hortifruti & Feira' || category === 'Padaria & Laticínios') {
+    return false;
+  }
+  return true;
 }
 
 export function classifyPriceSignal(changeVsAveragePct: number): PriceSignal {
@@ -214,6 +263,66 @@ export function calculateCategorySavings(
   return summaries.sort((a, b) => b.netSavings - a.netSavings);
 }
 
+export function calculateStockpileAutonomy(
+  inventory: InventoryItem[],
+  householdSize: number = 2,
+  dailyCostPerPerson: number = 25
+): {
+  stockpileValue: number;
+  stockpileUnits: number;
+  stockpileProductsCount: number;
+  survivalReserveDays: number;
+  survivalDaysByBudget: number;
+} {
+  const stockpileItems = inventory.filter((item) => item.quantity > 0 && item.isStockpile);
+  const stockpileValue = Number(
+    stockpileItems
+      .reduce((acc, item) => acc + item.quantity * item.unitPrice, 0)
+      .toFixed(2)
+  );
+  const stockpileUnits = Number(
+    stockpileItems.reduce((acc, item) => acc + item.quantity, 0).toFixed(1)
+  );
+  const uniqueKeys = new Set(stockpileItems.map((i) => i.productKey));
+
+  const foodUnits = stockpileItems
+    .filter(
+      (i) =>
+        i.category === 'Grãos & Secos' ||
+        i.category === 'Proteínas & Enlatados' ||
+        i.category === 'Água & Bebidas' ||
+        i.category === 'Óleos & Temperos' ||
+        i.category === 'Hortifruti & Feira' ||
+        i.category === 'Padaria & Laticínios'
+    )
+    .reduce((acc, item) => {
+      const unitLower = item.unit.toLowerCase();
+      const weight =
+        unitLower === 'kg'
+          ? 3
+          : item.category === 'Grãos & Secos'
+            ? 4
+            : item.category === 'Proteínas & Enlatados'
+              ? 1.5
+              : 1;
+      return acc + item.quantity * weight;
+    }, 0);
+
+  const safePeople = Math.max(1, householdSize);
+  const safeDailyCost = Math.max(1, dailyCostPerPerson);
+  const survivalReserveDays = Math.round(foodUnits / (safePeople * 1.1));
+  const survivalDaysByBudget =
+    stockpileValue > 0 ? Math.round(stockpileValue / (safePeople * safeDailyCost)) : 0;
+
+  return {
+    stockpileValue,
+    stockpileUnits,
+    stockpileProductsCount: uniqueKeys.size,
+    survivalReserveDays,
+    survivalDaysByBudget,
+  };
+}
+
 export function calculateDashboardKpis(
   inventory: InventoryItem[],
   receipts: ReceiptRecord[],
@@ -221,7 +330,8 @@ export function calculateDashboardKpis(
   warningDays: number = 30,
   criticalDays: number = 7,
   householdSize: number = 2,
-  referenceDate?: string
+  referenceDate?: string,
+  dailyCostPerPerson: number = 25
 ): DashboardKpis {
   let totalSpent = 0;
   let totalReference = 0;
@@ -257,6 +367,23 @@ export function calculateDashboardKpis(
     activeItems.reduce((acc, item) => acc + item.quantity, 0).toFixed(1)
   );
 
+  const routineItems = activeItems.filter((item) => !item.isStockpile);
+  const routineValue = Number(
+    routineItems
+      .reduce((acc, item) => acc + item.quantity * item.unitPrice, 0)
+      .toFixed(2)
+  );
+  const routineUnits = Number(
+    routineItems.reduce((acc, item) => acc + item.quantity, 0).toFixed(1)
+  );
+  const routineKeys = new Set(routineItems.map((i) => i.productKey));
+
+  const stockpile = calculateStockpileAutonomy(
+    activeItems,
+    householdSize,
+    dailyCostPerPerson
+  );
+
   let expiringSoonCount = 0;
   let expiredCount = 0;
   const uniqueKeys = new Set<string>();
@@ -280,30 +407,6 @@ export function calculateDashboardKpis(
   const belowAverageSharePct =
     trends.length > 0 ? Math.round((belowOrStable / trends.length) * 100) : 0;
 
-  // Survivalist autonomy estimate: food/water categories weighted by household size
-  const foodUnits = activeItems
-    .filter(
-      (i) =>
-        i.category === 'Grãos & Secos' ||
-        i.category === 'Proteínas & Enlatados' ||
-        i.category === 'Água & Bebidas' ||
-        i.category === 'Óleos & Temperos'
-    )
-    .reduce((acc, item) => {
-      const weight =
-        item.unit.toLowerCase() === 'kg'
-          ? 3
-          : item.category === 'Grãos & Secos'
-            ? 4
-            : item.category === 'Proteínas & Enlatados'
-              ? 1.5
-              : 1;
-      return acc + item.quantity * weight;
-    }, 0);
-
-  const safePeople = Math.max(1, householdSize);
-  const survivalReserveDays = Math.round(foodUnits / (safePeople * 1.1));
-
   return {
     totalSavings,
     totalSpent: roundedSpent,
@@ -311,31 +414,53 @@ export function calculateDashboardKpis(
     totalStockValue,
     totalUnits,
     uniqueProductsCount: uniqueKeys.size,
+    stockpileValue: stockpile.stockpileValue,
+    stockpileUnits: stockpile.stockpileUnits,
+    stockpileProductsCount: stockpile.stockpileProductsCount,
+    routineValue,
+    routineUnits,
+    routineProductsCount: routineKeys.size,
     expiringSoonCount,
     expiredCount,
     belowAverageSharePct,
-    survivalReserveDays,
+    survivalReserveDays: stockpile.survivalReserveDays,
+    survivalDaysByBudget: stockpile.survivalDaysByBudget,
   };
 }
 
 export function inferCategoryFromName(name: string): CategoryId {
   const n = normalizeProductKey(name);
-  if (/(arroz|feijao|macarrao|lentilha|aveia|farinha|acucar|cafe|grao|milho|fuba|sal)/.test(n)) {
+  if (
+    /(tomate|banana|alface|cebola|batata|maca|laranja|limao|cenoura|abobora|abobrinha|pepino|pimentao|mamao|melancia|uva|morango|brocolis|couve|cheiro verde|coentro|salsa|verdura|fruta|legume|hortifruti|feira|mandioca|inhame|beterraba|manga|abacaxi|pera|abacate)/.test(
+      n
+    )
+  ) {
+    return 'Hortifruti & Feira';
+  }
+  if (
+    /(pao|padaria|queijo|mussarela|prato|manteiga|margarina|iogurte|requeijao|leite|presunto|peito de peru|biscoito|bolo|torrada|creme de leite|leite condensado|nata|ricota)/.test(
+      n
+    )
+  ) {
+    return 'Padaria & Laticínios';
+  }
+  if (/(arroz|feijao|macarrao|lentilha|aveia|farinha|acucar|cafe|grao|milho|fuba|sal|granola|cuscuz|tapioca)/.test(n)) {
     return 'Grãos & Secos';
   }
-  if (/(sardinha|atum|carne|frango|ovo|leite|proteina|enlatad|charque|ervilha)/.test(n)) {
+  if (/(sardinha|atum|carne|frango|ovo|proteina|enlatad|charque|ervilha|peixe|bife|patinho|acem|linguica|bacon|salsicha)/.test(n)) {
     return 'Proteínas & Enlatados';
   }
-  if (/(agua|suco|cha|isotonic|bebida)/.test(n)) {
+  if (/(agua mineral|agua com gas|agua|suco|cha|isotonic|bebida|refrigerante|cerveja|vinho)/.test(n)) {
+    if (/(sanitaria|cloro)/.test(n)) return 'Higiene & Limpeza';
     return 'Água & Bebidas';
   }
-  if (/(oleo|azeite|vinagre|tempero|alho|extrato|molho)/.test(n)) {
+  if (/(oleo|azeite|vinagre|tempero|alho|extrato|molho|shoyu|ketchup|maionese|mostarda|oregano|pimenta)/.test(n)) {
     return 'Óleos & Temperos';
   }
-  if (/(sabao|detergente|alcool|papel|higiene|pasta|sabonete|agua sanitaria|cloro)/.test(n)) {
+  if (/(sabao|detergente|alcool|papel|higiene|pasta|sabonete|agua sanitaria|cloro|desinfetante|amaciante|shampoo|condicionador|esponja|lixo)/.test(n)) {
     return 'Higiene & Limpeza';
   }
-  if (/(pilha|bateria|vela|gas|fosforo|curativo|gaze|remedio|energia|lanterna)/.test(n)) {
+  if (/(pilha|bateria|vela|gas|fosforo|curativo|gaze|remedio|energia|lanterna|isqueiro)/.test(n)) {
     return 'Primeiros Socorros & Energia';
   }
   return 'Outros';
@@ -343,6 +468,10 @@ export function inferCategoryFromName(name: string): CategoryId {
 
 export function inferShelfLifeDays(category: CategoryId): number {
   switch (category) {
+    case 'Hortifruti & Feira':
+      return 7;
+    case 'Padaria & Laticínios':
+      return 14;
     case 'Grãos & Secos':
       return 365;
     case 'Proteínas & Enlatados':
@@ -398,10 +527,6 @@ export function parseRawReceiptTextLocally(
       continue;
     }
 
-    // Match patterns like:
-    // "ARROZ BRANCO 5KG 2 UN x 24,90"
-    // "FEIJAO CARIOCA 1KG | 3 | un | 7.50"
-    // "SARDINHA LATA 125G 4x 5,90"
     const pipeParts = line.split('|').map((p) => p.trim());
     if (pipeParts.length >= 3) {
       const name = pipeParts[0];
@@ -422,14 +547,16 @@ export function parseRawReceiptTextLocally(
           unit,
           unitPrice,
           referencePrice: trend ? trend.averagePrice : unitPrice,
-          expiryDate: addDaysToIso(detectedDate, inferShelfLifeDays(category)),
+          expiryDate: '',
+          isStockpile: defaultIsStockpileForCategory(category),
+          suggestedShelfLifeDays: inferShelfLifeDays(category),
         });
       }
       continue;
     }
 
     const regexMatch = line.match(
-      /^(.+?)\s+(\d+(?:[.,]\d+)?)\s*(un|kg|l|pct|lata|cx)?\s*[x×]\s*R?\$?\s*(\d+[.,]\d{2})(?:\s*=.*)?$/i
+      /^(.+?)\s+(\d+(?:[.,]\d+)?)\s*(un|kg|l|pct|lata|cx|bdj|dz)?\s*[x×]\s*R?\$?\s*(\d+[.,]\d{2})(?:\s*=.*)?$/i
     );
     if (regexMatch) {
       const name = regexMatch[1].trim();
@@ -448,7 +575,9 @@ export function parseRawReceiptTextLocally(
           unit,
           unitPrice,
           referencePrice: trend ? trend.averagePrice : unitPrice,
-          expiryDate: addDaysToIso(detectedDate, inferShelfLifeDays(category)),
+          expiryDate: '',
+          isStockpile: defaultIsStockpileForCategory(category),
+          suggestedShelfLifeDays: inferShelfLifeDays(category),
         });
       }
       continue;
@@ -470,13 +599,302 @@ export function parseRawReceiptTextLocally(
           unit: 'un',
           unitPrice,
           referencePrice: trend ? trend.averagePrice : unitPrice,
-          expiryDate: addDaysToIso(detectedDate, inferShelfLifeDays(category)),
+          expiryDate: '',
+          isStockpile: defaultIsStockpileForCategory(category),
+          suggestedShelfLifeDays: inferShelfLifeDays(category),
         });
       }
     }
   }
 
   return { storeName, purchaseDate: detectedDate, items };
+}
+
+export function getPreviousMonthKey(monthKey: string): string {
+  const [y, m] = monthKey.split('-').map(Number);
+  if (!y || !m) return monthKey;
+  const dt = new Date(Date.UTC(y, m - 2, 1));
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+export function shiftMonthKey(monthKey: string, deltaMonths: number): string {
+  const [y, m] = monthKey.split('-').map(Number);
+  if (!y || !m) return monthKey;
+  const dt = new Date(Date.UTC(y, m - 1 + deltaMonths, 1));
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+export function formatMonthLabelBR(monthKey: string): string {
+  const [y, m] = monthKey.split('-').map(Number);
+  if (!y || !m || m < 1 || m > 12) return monthKey;
+  return `${MONTH_NAMES_PT[m - 1]} ${y}`;
+}
+
+export function formatMonthShortBR(monthKey: string): string {
+  const [y, m] = monthKey.split('-').map(Number);
+  if (!y || !m || m < 1 || m > 12) return monthKey;
+  return `${MONTH_SHORT_PT[m - 1]}/${String(y).slice(-2)}`;
+}
+
+export function getAvailableMonths(
+  priceHistory: PriceRecord[],
+  receipts: ReceiptRecord[],
+  fallbackTodayIso: string = new Date().toISOString().slice(0, 10)
+): string[] {
+  const set = new Set<string>();
+  for (const p of priceHistory) {
+    if (p.purchaseDate && p.purchaseDate.length >= 7) {
+      set.add(p.purchaseDate.slice(0, 7));
+    }
+  }
+  for (const r of receipts) {
+    if (r.purchaseDate && r.purchaseDate.length >= 7) {
+      set.add(r.purchaseDate.slice(0, 7));
+    }
+  }
+  if (set.size === 0) {
+    set.add(fallbackTodayIso.slice(0, 7));
+  }
+  return Array.from(set).sort((a, b) => b.localeCompare(a));
+}
+
+export function buildMonthlyReport(
+  priceHistory: PriceRecord[],
+  receipts: ReceiptRecord[],
+  monthKey: string,
+  compareMonthKey: string = getPreviousMonthKey(monthKey)
+): MonthlyReportSummary {
+  const currentRecords = priceHistory.filter((r) => r.purchaseDate.startsWith(monthKey));
+  const compareRecords = priceHistory.filter((r) => r.purchaseDate.startsWith(compareMonthKey));
+  const monthReceipts = receipts.filter((r) => r.purchaseDate.startsWith(monthKey));
+
+  const catMap = new Map<
+    CategoryId,
+    {
+      currentSpent: number;
+      stockpileSpent: number;
+      routineSpent: number;
+      currentReference: number;
+      compareSpent: number;
+      itemCount: number;
+    }
+  >();
+
+  for (const cat of CATEGORIES) {
+    catMap.set(cat, {
+      currentSpent: 0,
+      stockpileSpent: 0,
+      routineSpent: 0,
+      currentReference: 0,
+      compareSpent: 0,
+      itemCount: 0,
+    });
+  }
+
+  let totalSpent = 0;
+  let stockpileSpent = 0;
+  let routineSpent = 0;
+  let totalReference = 0;
+  const items: MonthlyReportItem[] = [];
+
+  for (const rec of currentRecords) {
+    const qty = Math.max(0, rec.quantity);
+    const paid = Number((qty * rec.unitPrice).toFixed(2));
+    const refUnit = rec.referencePrice > 0 ? rec.referencePrice : rec.unitPrice;
+    const refTotal = Number((qty * refUnit).toFixed(2));
+    const isStockpile = rec.isStockpile ?? defaultIsStockpileForCategory(rec.category);
+
+    totalSpent += paid;
+    totalReference += refTotal;
+    if (isStockpile) stockpileSpent += paid;
+    else routineSpent += paid;
+
+    const bucket = catMap.get(rec.category) ?? catMap.get('Outros')!;
+    bucket.currentSpent += paid;
+    if (isStockpile) bucket.stockpileSpent += paid;
+    else bucket.routineSpent += paid;
+    bucket.currentReference += refTotal;
+    bucket.itemCount += 1;
+
+    items.push({
+      id: rec.id,
+      name: rec.productName,
+      category: rec.category,
+      quantity: qty,
+      unit: rec.unit,
+      unitPrice: rec.unitPrice,
+      referencePrice: refUnit,
+      totalPaid: paid,
+      netSavings: Number((refTotal - paid).toFixed(2)),
+      purchaseDate: rec.purchaseDate,
+      storeName: rec.storeName,
+      isStockpile,
+    });
+  }
+
+  let compareTotalSpent = 0;
+  for (const rec of compareRecords) {
+    const qty = Math.max(0, rec.quantity);
+    const paid = Number((qty * rec.unitPrice).toFixed(2));
+    compareTotalSpent += paid;
+    const bucket = catMap.get(rec.category) ?? catMap.get('Outros')!;
+    bucket.compareSpent += paid;
+  }
+
+  const roundedSpent = Number(totalSpent.toFixed(2));
+  const roundedStockpile = Number(stockpileSpent.toFixed(2));
+  const roundedRoutine = Number(routineSpent.toFixed(2));
+  const roundedRef = Number(totalReference.toFixed(2));
+  const netSavings = Number((roundedRef - roundedSpent).toFixed(2));
+  const savingsPercent =
+    roundedRef > 0 ? Number(((netSavings / roundedRef) * 100).toFixed(1)) : 0;
+
+  const roundedCompare = Number(compareTotalSpent.toFixed(2));
+  const compareDiffAmount = Number((roundedSpent - roundedCompare).toFixed(2));
+  const compareDiffPercent =
+    roundedCompare > 0
+      ? Number((((roundedSpent - roundedCompare) / roundedCompare) * 100).toFixed(1))
+      : null;
+
+  const stockpileSharePct =
+    roundedSpent > 0 ? Number(((roundedStockpile / roundedSpent) * 100).toFixed(1)) : 0;
+  const routineSharePct =
+    roundedSpent > 0 ? Number(((roundedRoutine / roundedSpent) * 100).toFixed(1)) : 0;
+
+  const categories: MonthlyCategoryComparison[] = [];
+  for (const [category, data] of catMap.entries()) {
+    if (data.currentSpent <= 0 && data.compareSpent <= 0) continue;
+    const curSpent = Number(data.currentSpent.toFixed(2));
+    const cmpSpent = Number(data.compareSpent.toFixed(2));
+    const curRef = Number(data.currentReference.toFixed(2));
+    const diffAmount = Number((curSpent - cmpSpent).toFixed(2));
+    const diffPercent =
+      cmpSpent > 0 ? Number((((curSpent - cmpSpent) / cmpSpent) * 100).toFixed(1)) : null;
+
+    categories.push({
+      category,
+      currentSpent: curSpent,
+      stockpileSpent: Number(data.stockpileSpent.toFixed(2)),
+      routineSpent: Number(data.routineSpent.toFixed(2)),
+      currentReference: curRef,
+      netSavings: Number((curRef - curSpent).toFixed(2)),
+      compareSpent: cmpSpent,
+      diffAmount,
+      diffPercent,
+      itemCount: data.itemCount,
+    });
+  }
+
+  categories.sort((a, b) => b.currentSpent - a.currentSpent);
+  items.sort((a, b) => b.purchaseDate.localeCompare(a.purchaseDate) || b.totalPaid - a.totalPaid);
+
+  return {
+    monthKey,
+    compareMonthKey,
+    totalSpent: roundedSpent,
+    stockpileSpent: roundedStockpile,
+    routineSpent: roundedRoutine,
+    stockpileSharePct,
+    routineSharePct,
+    totalReference: roundedRef,
+    netSavings,
+    savingsPercent,
+    compareTotalSpent: roundedCompare,
+    compareDiffAmount,
+    compareDiffPercent,
+    receiptCount: monthReceipts.length,
+    itemCount: items.length,
+    categories,
+    items,
+  };
+}
+
+export function buildMonthlyTrendSeries(
+  priceHistory: PriceRecord[],
+  endMonthKey: string,
+  monthsCount: number = 6
+): MonthlySeriesPoint[] {
+  const points: MonthlySeriesPoint[] = [];
+  for (let i = monthsCount - 1; i >= 0; i--) {
+    const mk = shiftMonthKey(endMonthKey, -i);
+    let stockpileSpent = 0;
+    let routineSpent = 0;
+    let totalRef = 0;
+
+    for (const rec of priceHistory) {
+      if (!rec.purchaseDate.startsWith(mk)) continue;
+      const qty = Math.max(0, rec.quantity);
+      const paid = qty * rec.unitPrice;
+      const refUnit = rec.referencePrice > 0 ? rec.referencePrice : rec.unitPrice;
+      totalRef += qty * refUnit;
+      const isStockpile = rec.isStockpile ?? defaultIsStockpileForCategory(rec.category);
+      if (isStockpile) stockpileSpent += paid;
+      else routineSpent += paid;
+    }
+
+    const sp = Number(stockpileSpent.toFixed(2));
+    const rt = Number(routineSpent.toFixed(2));
+    const tot = Number((sp + rt).toFixed(2));
+
+    points.push({
+      monthKey: mk,
+      label: formatMonthShortBR(mk),
+      stockpileSpent: sp,
+      routineSpent: rt,
+      totalSpent: tot,
+      netSavings: Number((totalRef - tot).toFixed(2)),
+    });
+  }
+  return points;
+}
+
+export function exportMonthlyReportCsv(report: MonthlyReportSummary): string {
+  const escape = (val: string | number) => {
+    const str = String(val);
+    if (str.includes(';') || str.includes('"') || str.includes('\n')) {
+      return `"${str.replace(/"/g, '""')}"`;
+    }
+    return str;
+  };
+
+  const lines: string[] = [];
+  lines.push(
+    [
+      'Data Compra',
+      'Produto',
+      'Categoria',
+      'Destino',
+      'Mercado',
+      'Quantidade',
+      'Unidade',
+      'Preco Unitario (BRL)',
+      'Ref. Mercado (BRL)',
+      'Total Pago (BRL)',
+      'Economia vs Ref (BRL)',
+    ].join(';')
+  );
+
+  for (const item of report.items) {
+    lines.push(
+      [
+        formatDateBR(item.purchaseDate),
+        item.name,
+        item.category,
+        item.isStockpile ? 'Estocada' : 'Uso Diario (Rotineira)',
+        item.storeName,
+        item.quantity.toString().replace('.', ','),
+        item.unit,
+        item.unitPrice.toFixed(2).replace('.', ','),
+        item.referencePrice.toFixed(2).replace('.', ','),
+        item.totalPaid.toFixed(2).replace('.', ','),
+        item.netSavings.toFixed(2).replace('.', ','),
+      ]
+        .map(escape)
+        .join(';')
+    );
+  }
+
+  return `\uFEFF${lines.join('\n')}`;
 }
 
 export function formatBRL(value: number): string {
@@ -487,6 +905,7 @@ export function formatBRL(value: number): string {
 }
 
 export function formatDateBR(isoDate: string): string {
+  if (!isoDate) return 'Sem data';
   const [y, m, d] = isoDate.split('-');
   if (!y || !m || !d) return isoDate;
   return `${d}/${m}/${y}`;

@@ -1,12 +1,15 @@
 import { useState } from 'react';
 import {
   AlertTriangle,
+  Archive,
   ArrowDownRight,
   ArrowRight,
   ArrowUpRight,
   BellRing,
   CheckCircle2,
+  FileBarChart2,
   ShieldCheck,
+  ShoppingBasket,
   TrendingDown,
 } from 'lucide-react';
 import type {
@@ -21,7 +24,9 @@ import {
   formatBRL,
   formatDateBR,
   getExpiryStatus,
+  hasValidExpiryDate,
 } from '../utils/analytics';
+import type { ActiveTab } from './TopBar';
 
 interface DashboardViewProps {
   kpis: DashboardKpis;
@@ -30,9 +35,12 @@ interface DashboardViewProps {
   inventory: InventoryItem[];
   warningDays: number;
   criticalDays: number;
-  onNavigateTab: (tab: 'inventory' | 'prices' | 'receipts' | 'alerts') => void;
+  householdSize: number;
+  dailyCostPerPerson: number;
+  onNavigateTab: (tab: ActiveTab) => void;
   onSelectProductForTrend: (productKey: string) => void;
   onSelectCategoryFilter: (category: CategoryId | 'Todas') => void;
+  onSelectPantryMode?: (mode: 'all' | 'stockpile' | 'routine') => void;
   onOpenScanner: () => void;
 }
 
@@ -43,9 +51,12 @@ export function DashboardView({
   inventory,
   warningDays,
   criticalDays,
+  householdSize,
+  dailyCostPerPerson,
   onNavigateTab,
   onSelectProductForTrend,
   onSelectCategoryFilter,
+  onSelectPantryMode,
   onOpenScanner,
 }: DashboardViewProps) {
   const [selectedCategory, setSelectedCategory] = useState<CategoryId | 'Todas'>('Todas');
@@ -60,7 +71,7 @@ export function DashboardView({
   );
 
   const expiringItems = inventory
-    .filter((item) => item.quantity > 0)
+    .filter((item) => item.quantity > 0 && hasValidExpiryDate(item.expiryDate))
     .filter((item) => (selectedCategory === 'Todas' ? true : item.category === selectedCategory))
     .map((item) => ({
       item,
@@ -77,37 +88,50 @@ export function DashboardView({
       <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
         <div>
           <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900 text-balance">
-            Painel de Estoque e Economia
+            Controle de Gastos de Feira e Estocagem
           </h1>
           <p className="mt-1 text-sm text-slate-600">
-            Controle doméstico e sobrevivencialismo com base nos cupons fiscais armazenados localmente.
+            Acompanhe se você comprou bem ou pagou mais caro, separe uso diário da reserva estocada e acompanhe sua autonomia.
           </p>
         </div>
 
-        <div className="flex items-center gap-2 overflow-x-auto pb-1 sm:pb-0">
-          <label htmlFor="dashboard-category-filter" className="text-xs font-medium text-slate-600 whitespace-nowrap">
-            Filtrar categoria:
-          </label>
-          <select
-            id="dashboard-category-filter"
-            value={selectedCategory}
-            onChange={(e) => setSelectedCategory(e.target.value as CategoryId | 'Todas')}
-            className="text-sm bg-white border border-slate-200 rounded-lg px-3 py-1.5 text-slate-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700"
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={() => onNavigateTab('report')}
+            className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 rounded-lg px-3 py-1.5 transition-colors whitespace-nowrap"
           >
-            <option value="Todas">Todas as categorias</option>
-            {categorySavings.map((cat) => (
-              <option key={cat.category} value={cat.category}>
-                {cat.category}
-              </option>
-            ))}
-          </select>
+            <FileBarChart2 className="w-3.5 h-3.5" aria-hidden="true" />
+            <span>Ver Relatório Mensal</span>
+          </button>
+
+          <div className="flex items-center gap-2">
+            <label htmlFor="dashboard-category-filter" className="text-xs font-medium text-slate-600 whitespace-nowrap">
+              Categoria:
+            </label>
+            <select
+              id="dashboard-category-filter"
+              value={selectedCategory}
+              onChange={(e) => setSelectedCategory(e.target.value as CategoryId | 'Todas')}
+              className="text-sm bg-white border border-slate-200 rounded-lg px-3 py-1.5 text-slate-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700"
+            >
+              <option value="Todas">Todas as categorias</option>
+              {categorySavings.map((cat) => (
+                <option key={cat.category} value={cat.category}>
+                  {cat.category}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
       </div>
 
       {/* 4-KPI Strip */}
       <section aria-label="Indicadores principais" className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="bg-white border border-slate-200 rounded-xl p-5">
-          <p className="text-xs font-medium text-slate-500">Economia Acumulada</p>
+          <p className="text-xs font-medium text-slate-500">
+            {kpis.totalSavings >= 0 ? 'Economia Acumulada (Comprou Bem)' : 'Acréscimo vs. Referência'}
+          </p>
           <div className="mt-2 flex items-baseline justify-between gap-2">
             <span
               data-testid="kpi-total-savings"
@@ -115,6 +139,7 @@ export function DashboardView({
                 kpis.totalSavings >= 0 ? 'text-emerald-700' : 'text-red-700'
               }`}
             >
+              {kpis.totalSavings >= 0 ? '+' : ''}
               {formatBRL(kpis.totalSavings)}
             </span>
             <span className="text-xs font-mono tabular-nums text-slate-600">
@@ -122,12 +147,12 @@ export function DashboardView({
             </span>
           </div>
           <p className="mt-2 text-xs text-slate-500">
-            Sobre {formatBRL(kpis.totalSpent)} gastos em compras
+            Sobre {formatBRL(kpis.totalSpent)} gastos em compras registradas
           </p>
         </div>
 
         <div className="bg-white border border-slate-200 rounded-xl p-5">
-          <p className="text-xs font-medium text-slate-500">Valor em Despensa</p>
+          <p className="text-xs font-medium text-slate-500">Valor Total na Despensa</p>
           <div className="mt-2 flex items-baseline justify-between gap-2">
             <span data-testid="kpi-stock-value" className="text-2xl font-bold font-mono tabular-nums text-slate-900">
               {formatBRL(kpis.totalStockValue)}
@@ -137,23 +162,23 @@ export function DashboardView({
             </span>
           </div>
           <p className="mt-2 text-xs text-slate-500">
-            {kpis.uniqueProductsCount} produtos catalogados ativos
+            Estocada: <strong className="text-emerald-800">{formatBRL(kpis.stockpileValue)}</strong> · Rotineira: <strong className="text-slate-700">{formatBRL(kpis.routineValue)}</strong>
           </p>
         </div>
 
         <div className="bg-white border border-slate-200 rounded-xl p-5">
-          <p className="text-xs font-medium text-slate-500">Autonomia Sobrevivencialista</p>
+          <p className="text-xs font-medium text-slate-500">Autonomia da Despensa Estocada</p>
           <div className="mt-2 flex items-baseline justify-between gap-2">
-            <span className="text-2xl font-bold font-mono tabular-nums text-slate-900">
+            <span className="text-2xl font-bold font-mono tabular-nums text-emerald-800">
               {kpis.survivalReserveDays} dias
             </span>
-            <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700">
+            <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700 font-mono tabular-nums">
               <ShieldCheck className="w-3.5 h-3.5" aria-hidden="true" />
-              <span>{kpis.belowAverageSharePct}% bom preço</span>
+              <span>{kpis.survivalDaysByBudget}d p/ valor</span>
             </span>
           </div>
           <p className="mt-2 text-xs text-slate-500">
-            Estimativa de reserva alimentar e água
+            Apenas itens estocados · {householdSize} {householdSize === 1 ? 'pessoa' : 'pessoas'} ({formatBRL(dailyCostPerPerson)}/dia)
           </p>
         </div>
 
@@ -173,13 +198,81 @@ export function DashboardView({
               onClick={() => onNavigateTab('alerts')}
               className="text-xs font-medium text-emerald-700 hover:text-emerald-800 inline-flex items-center gap-1 whitespace-nowrap"
             >
-              <span>Configurar Push</span>
+              <span>Ajustes</span>
               <ArrowRight className="w-3.5 h-3.5" aria-hidden="true" />
             </button>
           </div>
           <p className="mt-2 text-xs text-slate-500">
             {kpis.expiredCount} vencidos · {kpis.expiringSoonCount} em até {warningDays}d
           </p>
+        </div>
+      </section>
+
+      {/* Split Summary: Despensa Estocada vs Despensa Rotineira */}
+      <section aria-label="Separação entre despensa estocada e rotineira" className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="bg-white border border-emerald-200 rounded-xl p-5 flex flex-col justify-between gap-3">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-800 bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 rounded-full">
+                <Archive className="w-3.5 h-3.5" aria-hidden="true" />
+                <span>Despensa Estocada (Reserva)</span>
+              </span>
+              <div className="mt-2 flex items-baseline gap-3">
+                <span className="text-2xl font-bold font-mono tabular-nums text-slate-900">
+                  {formatBRL(kpis.stockpileValue)}
+                </span>
+                <span className="text-xs font-mono tabular-nums text-slate-500">
+                  {kpis.stockpileProductsCount} produtos · {kpis.stockpileUnits} un.
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-slate-600">
+                Previsão de autonomia: <strong className="font-mono text-emerald-800">{kpis.survivalReserveDays} dias</strong> (volume alimentar) ·{' '}
+                <strong className="font-mono text-emerald-800">{kpis.survivalDaysByBudget} dias</strong> (pelo valor investido).
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                onSelectPantryMode?.('stockpile');
+                onNavigateTab('inventory');
+              }}
+              className="text-xs font-medium text-emerald-700 hover:text-emerald-800 whitespace-nowrap shrink-0"
+            >
+              Abrir reserva →
+            </button>
+          </div>
+        </div>
+
+        <div className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col justify-between gap-3">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-amber-800 bg-amber-50 border border-amber-200 px-2.5 py-0.5 rounded-full">
+                <ShoppingBasket className="w-3.5 h-3.5" aria-hidden="true" />
+                <span>Despensa Rotineira (Uso Diário / Feira)</span>
+              </span>
+              <div className="mt-2 flex items-baseline gap-3">
+                <span className="text-2xl font-bold font-mono tabular-nums text-slate-900">
+                  {formatBRL(kpis.routineValue)}
+                </span>
+                <span className="text-xs font-mono tabular-nums text-slate-500">
+                  {kpis.routineProductsCount} produtos · {kpis.routineUnits} un.
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-slate-600">
+                Hortifruti, padaria, laticínios e consumo semanal — não entram no cálculo de autonomia da reserva.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                onSelectPantryMode?.('routine');
+                onNavigateTab('inventory');
+              }}
+              className="text-xs font-medium text-slate-700 hover:text-slate-900 whitespace-nowrap shrink-0"
+            >
+              Abrir feira/uso diário →
+            </button>
+          </div>
         </div>
       </section>
 
@@ -190,10 +283,10 @@ export function DashboardView({
           <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-slate-100">
             <div>
               <h2 className="text-base font-semibold text-slate-900">
-                Economia Acumulada por Categoria
+                Gastos e Economia por Categoria (Feira &amp; Estocagem)
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Diferença entre o preço pago nos cupons e a referência de mercado ou média histórica.
+                Veja em quais categorias você comprou bem (verde) ou pagou acima da referência (vermelho).
               </p>
             </div>
             <button
@@ -267,11 +360,12 @@ export function DashboardView({
 
                     <div className="mt-1.5 flex items-center justify-between text-xs text-slate-500">
                       <span>
-                        {cat.activeStockUnits} un. em estoque · Valor atual {formatBRL(cat.activeStockValue)}
+                        {cat.activeStockUnits} un. na despensa · Valor atual {formatBRL(cat.activeStockValue)}
                       </span>
                       <button
                         type="button"
                         onClick={() => {
+                          onSelectPantryMode?.('all');
                           onSelectCategoryFilter(cat.category);
                           onNavigateTab('inventory');
                         }}
@@ -295,7 +389,7 @@ export function DashboardView({
                 Rotação PEPS e Vencimentos
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Itens com validade nos próximos {warningDays} dias.
+                Apenas itens com validade informada vencendo em até {warningDays} dias.
               </p>
             </div>
             <button
@@ -313,7 +407,7 @@ export function DashboardView({
               <CheckCircle2 className="w-7 h-7 text-emerald-600 mx-auto" aria-hidden="true" />
               <p className="text-sm font-medium text-slate-900">Nenhum item próximo do vencimento</p>
               <p className="text-xs text-slate-500">
-                Todos os lotes estocados estão dentro do prazo seguro.
+                Itens com validade informada estão no prazo seguro (itens sem data não geram falso alerta).
               </p>
             </div>
           ) : (
@@ -333,7 +427,18 @@ export function DashboardView({
                 return (
                   <li key={item.id} className="py-3.5 flex items-start justify-between gap-4">
                     <div className="min-w-0">
-                      <p className="text-sm font-medium text-slate-900 truncate">{item.name}</p>
+                      <div className="flex items-center gap-2">
+                        <p className="text-sm font-medium text-slate-900 truncate">{item.name}</p>
+                        <span
+                          className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${
+                            item.isStockpile
+                              ? 'bg-emerald-50 text-emerald-800'
+                              : 'bg-amber-50 text-amber-800'
+                          }`}
+                        >
+                          {item.isStockpile ? 'Estocada' : 'Rotineira'}
+                        </span>
+                      </div>
                       <p className="text-xs text-slate-500 mt-0.5">
                         {item.category} · {item.quantity} {item.unit} · Val. {formatDateBR(item.expiryDate)}
                       </p>
@@ -359,21 +464,21 @@ export function DashboardView({
               onClick={() => onNavigateTab('inventory')}
               className="text-xs font-medium text-emerald-700 hover:text-emerald-800 whitespace-nowrap"
             >
-              Gerenciar estoque →
+              Gerenciar despensa →
             </button>
           </div>
         </section>
       </div>
 
-      {/* Survivalist Price Opportunities Table */}
+      {/* Price Evolution Monitor */}
       <section className="bg-white border border-slate-200 rounded-xl overflow-hidden">
         <div className="px-6 py-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-4">
           <div>
             <h2 className="text-base font-semibold text-slate-900">
-              Monitor de Estocagem e Preços Históricos
+              Evolução de Preços: Comprou Bem ou Pagou Mais Caro?
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Compare a última compra registrada contra o preço médio histórico para decidir o momento de estocar.
+              Compare o último preço pago contra a sua média histórica para aproveitar quedas na feira e na estocagem.
             </p>
           </div>
           <button
@@ -394,11 +499,11 @@ export function DashboardView({
                 <th className="py-3 px-4 text-right">Último Pago</th>
                 <th className="py-3 px-4 text-right">Média Histórica</th>
                 <th className="py-3 px-4 text-right">Variação</th>
-                <th className="py-3 px-6 text-right">Sinal p/ Sobrevivencialismo</th>
+                <th className="py-3 px-6 text-right">Avaliação da Compra</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 text-sm">
-              {opportunities.slice(0, 8).map((trend) => {
+              {opportunities.slice(0, 10).map((trend) => {
                 const isCheaper = trend.changeVsAveragePct <= -5;
                 const isHigher = trend.changeVsAveragePct >= 5;
 
@@ -452,16 +557,16 @@ export function DashboardView({
                     </td>
                     <td className="py-3 px-6 text-right whitespace-nowrap">
                       {trend.signal === 'ideal_to_stock' ? (
-                        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-700">
+                        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700">
                           <TrendingDown className="w-3.5 h-3.5" aria-hidden="true" />
-                          <span>Bom para estocar</span>
+                          <span>Comprou bem · Bom p/ estocar</span>
                         </span>
                       ) : trend.signal === 'above_average' ? (
-                        <span className="text-xs font-medium text-red-700">
-                          Acima da média · Aguardar
+                        <span className="text-xs font-semibold text-red-700">
+                          Pagou mais caro · Aguardar
                         </span>
                       ) : (
-                        <span className="text-xs text-slate-600">Preço estável</span>
+                        <span className="text-xs text-slate-600">Preço dentro da média</span>
                       )}
                     </td>
                   </tr>

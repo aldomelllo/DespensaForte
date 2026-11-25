@@ -1,5 +1,16 @@
 import { useRef, useState } from 'react';
-import { Camera, FileText, Loader2, Plus, Trash2, Upload, X } from 'lucide-react';
+import {
+  Archive,
+  Camera,
+  FileText,
+  Loader2,
+  Plus,
+  ShoppingBasket,
+  Sparkles,
+  Trash2,
+  Upload,
+  X,
+} from 'lucide-react';
 import {
   CATEGORIES,
   type CategoryId,
@@ -9,6 +20,7 @@ import {
 import {
   addDaysToIso,
   calculateReceiptTotals,
+  defaultIsStockpileForCategory,
   formatBRL,
   inferCategoryFromName,
   inferShelfLifeDays,
@@ -16,6 +28,7 @@ import {
   parseRawReceiptTextLocally,
 } from '../utils/analytics';
 import { createDemoScannedReceipt } from '../data/seedData';
+import { compressReceiptImage } from '../utils/imageCompression';
 
 interface ReceiptScannerModalProps {
   isOpen: boolean;
@@ -60,6 +73,7 @@ export function ReceiptScannerModal({
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [compressionNote, setCompressionNote] = useState<string | null>(null);
 
   const todayIso = new Date().toISOString().slice(0, 10);
   const [storeName, setStoreName] = useState('');
@@ -67,7 +81,7 @@ export function ReceiptScannerModal({
   const [sourceType, setSourceType] = useState<'ocr_photo' | 'local_text' | 'demo_seed'>('ocr_photo');
   const [draftItems, setDraftItems] = useState<ParsedDraftItem[]>([]);
   const [rawTextInput, setRawTextInput] = useState(
-    'Atacadão Sul\n17/11/2026\nARROZ BRANCO 5KG 3 pct x 22,50\nFEIJAO PRETO 1KG 6 pct x 6,40\nSARDINHA LATA 125G 10 lata x 5,10'
+    'Atacadão Sul\n20/11/2026\nARROZ BRANCO 5KG 3 pct x 22,50\nTOMATE ITALIANO 2 kg x 6,90\nPAO DE FORMA INTEGRAL 2 pct x 8,40\nSARDINHA LATA 125G 10 lata x 5,10'
   );
 
   if (!isOpen) return null;
@@ -94,25 +108,25 @@ export function ReceiptScannerModal({
 
   async function handleFileSelected(file: File) {
     setErrorMsg(null);
+    setCompressionNote(null);
     setIsLoading(true);
     setSourceType('ocr_photo');
 
     try {
-      const dataUrl = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result));
-        reader.onerror = () => reject(new Error('Falha ao ler arquivo de imagem.'));
-        reader.readAsDataURL(file);
-      });
-
-      setPreviewUrl(dataUrl);
+      const compressed = await compressReceiptImage(file, 1600, 0.82);
+      setPreviewUrl(compressed.dataUrl);
+      if (compressed.width > 0) {
+        setCompressionNote(
+          `Otimizada para ${compressed.width}×${compressed.height}px (~${compressed.estimatedKB} KB JPEG)`
+        );
+      }
 
       const response = await fetch('/api/parse-receipt', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          imageBase64: dataUrl,
-          mimeType: file.type || 'image/jpeg',
+          imageBase64: compressed.dataUrl,
+          mimeType: compressed.mimeType,
           todayIso,
         }),
       });
@@ -126,11 +140,13 @@ export function ReceiptScannerModal({
       setStoreName(data.storeName || 'Mercado');
       setPurchaseDate(detectedDate);
 
+      // Validade inicia SEMPRE vazia ('') — preenchimento somente manual ou via botão "Sugerir"
       const mapped: ParsedDraftItem[] = (data.items ?? []).map((item, idx) => {
         const cat = resolveCategory(item.category, item.name);
-        const shelfDays = item.suggestedShelfLifeDays && item.suggestedShelfLifeDays > 0
-          ? item.suggestedShelfLifeDays
-          : inferShelfLifeDays(cat);
+        const shelfDays =
+          item.suggestedShelfLifeDays && item.suggestedShelfLifeDays > 0
+            ? item.suggestedShelfLifeDays
+            : inferShelfLifeDays(cat);
         return {
           tempId: `ocr-${idx}-${Date.now()}`,
           name: item.name,
@@ -139,7 +155,9 @@ export function ReceiptScannerModal({
           unit: item.unit || 'un',
           unitPrice: item.unitPrice > 0 ? item.unitPrice : 0,
           referencePrice: mapReferencePrice(item.name, item.estimatedMarketPrice, item.unitPrice),
-          expiryDate: addDaysToIso(detectedDate, shelfDays),
+          expiryDate: '',
+          isStockpile: defaultIsStockpileForCategory(cat),
+          suggestedShelfLifeDays: shelfDays,
         };
       });
 
@@ -165,7 +183,7 @@ export function ReceiptScannerModal({
     setSourceType('local_text');
     setStoreName(parsed.storeName);
     setPurchaseDate(parsed.purchaseDate);
-    setDraftItems(parsed.items);
+    setDraftItems(parsed.items.map((item) => ({ ...item, expiryDate: '' })));
   }
 
   function handleLoadDemoReceipt() {
@@ -177,6 +195,7 @@ export function ReceiptScannerModal({
     setDraftItems(
       demo.items.map((item) => ({
         ...item,
+        expiryDate: '',
         referencePrice: mapReferencePrice(item.name, item.referencePrice, item.unitPrice),
       }))
     );
@@ -186,6 +205,19 @@ export function ReceiptScannerModal({
     setDraftItems((prev) =>
       prev.map((item) => (item.tempId === tempId ? { ...item, ...patch } : item))
     );
+  }
+
+  function suggestExpiryForItem(item: ParsedDraftItem) {
+    const baseDate = purchaseDate || todayIso;
+    const days =
+      item.suggestedShelfLifeDays && item.suggestedShelfLifeDays > 0
+        ? item.suggestedShelfLifeDays
+        : inferShelfLifeDays(item.category);
+    updateDraftItem(item.tempId, { expiryDate: addDaysToIso(baseDate, days) });
+  }
+
+  function setAllStockpile(isStockpile: boolean) {
+    setDraftItems((prev) => prev.map((item) => ({ ...item, isStockpile })));
   }
 
   function removeDraftItem(tempId: string) {
@@ -203,7 +235,9 @@ export function ReceiptScannerModal({
         unit: 'un',
         unitPrice: 10,
         referencePrice: 10,
-        expiryDate: addDaysToIso(purchaseDate || todayIso, 180),
+        expiryDate: '',
+        isStockpile: false,
+        suggestedShelfLifeDays: 180,
       },
     ]);
   }
@@ -227,27 +261,30 @@ export function ReceiptScannerModal({
     });
     setDraftItems([]);
     setPreviewUrl(null);
+    setCompressionNote(null);
     onClose();
   }
 
   const totals = calculateReceiptTotals(draftItems);
+  const stockpileCount = draftItems.filter((i) => i.isStockpile).length;
+  const routineCount = draftItems.length - stockpileCount;
 
   return (
     <div
       role="dialog"
       aria-modal="true"
       aria-labelledby="scanner-modal-title"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 overflow-y-auto"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-3 sm:p-4 overflow-y-auto"
     >
-      <div className="bg-white border border-slate-200 rounded-xl w-full max-w-5xl max-h-[92vh] flex flex-col overflow-hidden">
+      <div className="bg-white border border-slate-200 rounded-xl w-full max-w-6xl max-h-[92vh] flex flex-col overflow-hidden">
         {/* Header */}
         <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between gap-4">
           <div>
             <h2 id="scanner-modal-title" className="text-lg font-bold text-slate-900">
-              Leitura Automatizada de Cupom Fiscal
+              Conferência de Cupom Fiscal (Feira &amp; Estocagem)
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Extraia produtos, quantidades e validades por foto (OCR) ou processamento 100% local por texto.
+              Envie a foto do cupom (comprimida automaticamente) ou cole o texto. A validade inicia vazia para evitar falsos alertas — digite a data real ou clique em &ldquo;Sugerir&rdquo;.
             </p>
           </div>
           <button
@@ -313,7 +350,7 @@ export function ReceiptScannerModal({
                   Suba uma foto legível do cupom fiscal (NFC-e / SAT)
                 </p>
                 <p className="text-xs text-slate-600">
-                  O leitor identifica o mercado, data, itens, quantidades, preços unitários e sugere a validade por categoria. Os dados salvos ficam apenas no seu dispositivo.
+                  A foto é redimensionada no seu celular/navegador (máx. 1600px JPEG) antes do envio para leitura rápida. Depois você revisa os itens, escolhe o destino (Estocar ou Rotineira) e informa a validade se quiser.
                 </p>
                 <div className="pt-2 flex flex-wrap items-center gap-3">
                   <input
@@ -340,6 +377,9 @@ export function ReceiptScannerModal({
                     )}
                     <span>{isLoading ? 'Lendo cupom fiscal...' : 'Selecionar Foto do Cupom'}</span>
                   </button>
+                  {compressionNote && (
+                    <span className="text-[11px] font-mono text-slate-500">{compressionNote}</span>
+                  )}
                 </div>
               </div>
 
@@ -388,7 +428,7 @@ export function ReceiptScannerModal({
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-slate-200">
                 <div>
                   <label htmlFor="draft-store-name" className="block text-xs font-medium text-slate-700 mb-1">
-                    Estabelecimento
+                    Estabelecimento / Feira
                   </label>
                   <input
                     id="draft-store-name"
@@ -400,7 +440,7 @@ export function ReceiptScannerModal({
                 </div>
                 <div>
                   <label htmlFor="draft-purchase-date" className="block text-xs font-medium text-slate-700 mb-1">
-                    Data da Compra
+                    Data da Compra (impressa no cupom)
                   </label>
                   <input
                     id="draft-purchase-date"
@@ -412,18 +452,42 @@ export function ReceiptScannerModal({
                 </div>
               </div>
 
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-slate-900">
-                  Itens Extraídos para Revisão ({draftItems.length})
-                </h3>
-                <button
-                  type="button"
-                  onClick={addBlankDraftItem}
-                  className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700 hover:text-emerald-800"
-                >
-                  <Plus className="w-3.5 h-3.5" aria-hidden="true" />
-                  <span>Adicionar linha</span>
-                </button>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-900">
+                    Itens para Conferência ({draftItems.length})
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    {stockpileCount} para Estocar (Reserva) · {routineCount} para Uso Diário (Rotineira)
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setAllStockpile(true)}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 rounded-md"
+                  >
+                    <Archive className="w-3.5 h-3.5" aria-hidden="true" />
+                    <span>Marcar todos Estocar</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAllStockpile(false)}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-amber-800 bg-amber-50 border border-amber-200 hover:bg-amber-100 rounded-md"
+                  >
+                    <ShoppingBasket className="w-3.5 h-3.5" aria-hidden="true" />
+                    <span>Marcar todos Rotineira</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={addBlankDraftItem}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-200 bg-white hover:bg-slate-50 rounded-md"
+                  >
+                    <Plus className="w-3.5 h-3.5" aria-hidden="true" />
+                    <span>Adicionar linha</span>
+                  </button>
+                </div>
               </div>
 
               <div className="border border-slate-200 rounded-xl overflow-x-auto">
@@ -432,11 +496,12 @@ export function ReceiptScannerModal({
                     <tr className="bg-slate-50 border-b border-slate-200 text-xs font-medium text-slate-500">
                       <th className="py-2.5 px-3">Produto</th>
                       <th className="py-2.5 px-2">Categoria</th>
+                      <th className="py-2.5 px-2">Destino</th>
                       <th className="py-2.5 px-2 text-right">Qtd</th>
                       <th className="py-2.5 px-2">Un.</th>
                       <th className="py-2.5 px-2 text-right">Unit. (R$)</th>
                       <th className="py-2.5 px-2 text-right">Ref./Hist.</th>
-                      <th className="py-2.5 px-2">Validade</th>
+                      <th className="py-2.5 px-2">Validade (opcional)</th>
                       <th className="py-2.5 px-2 text-right">Ação</th>
                     </tr>
                   </thead>
@@ -445,7 +510,7 @@ export function ReceiptScannerModal({
                       const diff = item.referencePrice - item.unitPrice;
                       return (
                         <tr key={item.tempId}>
-                          <td className="py-2 px-3 min-w-[180px]">
+                          <td className="py-2 px-3 min-w-[165px]">
                             <input
                               type="text"
                               aria-label={`Nome do produto ${item.name}`}
@@ -460,11 +525,13 @@ export function ReceiptScannerModal({
                             <select
                               aria-label={`Categoria de ${item.name}`}
                               value={item.category}
-                              onChange={(e) =>
+                              onChange={(e) => {
+                                const nextCat = e.target.value as CategoryId;
                                 updateDraftItem(item.tempId, {
-                                  category: e.target.value as CategoryId,
-                                })
-                              }
+                                  category: nextCat,
+                                  suggestedShelfLifeDays: inferShelfLifeDays(nextCat),
+                                });
+                              }}
                               className="border border-slate-200 rounded px-2 py-1 bg-white text-slate-900"
                             >
                               {CATEGORIES.map((c) => (
@@ -473,6 +540,32 @@ export function ReceiptScannerModal({
                                 </option>
                               ))}
                             </select>
+                          </td>
+                          <td className="py-2 px-2 whitespace-nowrap">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                updateDraftItem(item.tempId, { isStockpile: !item.isStockpile })
+                              }
+                              aria-label={`Alternar destino de ${item.name}`}
+                              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium border transition-colors ${
+                                item.isStockpile
+                                  ? 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
+                                  : 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100'
+                              }`}
+                            >
+                              {item.isStockpile ? (
+                                <>
+                                  <Archive className="w-3 h-3" aria-hidden="true" />
+                                  <span>Estocar</span>
+                                </>
+                              ) : (
+                                <>
+                                  <ShoppingBasket className="w-3 h-3" aria-hidden="true" />
+                                  <span>Rotineira</span>
+                                </>
+                              )}
+                            </button>
                           </td>
                           <td className="py-2 px-2 w-20">
                             <input
@@ -539,16 +632,27 @@ export function ReceiptScannerModal({
                               </span>
                             )}
                           </td>
-                          <td className="py-2 px-2">
-                            <input
-                              type="date"
-                              aria-label={`Validade de ${item.name}`}
-                              value={item.expiryDate}
-                              onChange={(e) =>
-                                updateDraftItem(item.tempId, { expiryDate: e.target.value })
-                              }
-                              className="font-mono tabular-nums border border-slate-200 rounded px-2 py-1"
-                            />
+                          <td className="py-2 px-2 whitespace-nowrap">
+                            <div className="flex items-center gap-1">
+                              <input
+                                type="date"
+                                aria-label={`Validade de ${item.name}`}
+                                value={item.expiryDate}
+                                onChange={(e) =>
+                                  updateDraftItem(item.tempId, { expiryDate: e.target.value })
+                                }
+                                className="font-mono tabular-nums border border-slate-200 rounded px-2 py-1 text-slate-900"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => suggestExpiryForItem(item)}
+                                title={`Sugerir validade estimada (+${item.suggestedShelfLifeDays || inferShelfLifeDays(item.category)} dias)`}
+                                className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 rounded whitespace-nowrap"
+                              >
+                                <Sparkles className="w-3 h-3" aria-hidden="true" />
+                                <span>Sugerir</span>
+                              </button>
+                            </div>
                           </td>
                           <td className="py-2 px-2 text-right">
                             <button
@@ -576,7 +680,7 @@ export function ReceiptScannerModal({
             {draftItems.length > 0 ? (
               <span>
                 Total Pago: <strong className="text-slate-900">{formatBRL(totals.totalPaid)}</strong> ·{' '}
-                Economia neste cupom:{' '}
+                {totals.netSavings >= 0 ? 'Economia neste cupom: ' : 'Acima da referência: '}
                 <strong className={totals.netSavings >= 0 ? 'text-emerald-700' : 'text-red-700'}>
                   {totals.netSavings >= 0 ? '+' : ''}
                   {formatBRL(totals.netSavings)}
@@ -601,7 +705,7 @@ export function ReceiptScannerModal({
               onClick={handleSave}
               className="px-4 py-2 text-sm font-medium text-white bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 rounded-lg transition-colors"
             >
-              Confirmar Entrada no Estoque
+              Confirmar Entrada na Despensa
             </button>
           </div>
         </div>

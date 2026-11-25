@@ -1,5 +1,14 @@
 import { useRef, useState } from 'react';
-import { BellRing, Download, RotateCcw, Shield, Upload } from 'lucide-react';
+import {
+  BellRing,
+  Check,
+  Download,
+  Eraser,
+  RotateCcw,
+  Share2,
+  Shield,
+  Upload,
+} from 'lucide-react';
 import type { AlertSettings, AppState, InventoryItem } from '../types/inventory';
 import {
   buildExpiryAlertMessage,
@@ -8,6 +17,7 @@ import {
   requestPushPermission,
   type PushSupportState,
 } from '../utils/notifications';
+import { formatDateBR, hasValidExpiryDate } from '../utils/analytics';
 import { exportStateAsJson, parseImportedState } from '../utils/storage';
 
 interface SettingsAlertsViewProps {
@@ -15,6 +25,7 @@ interface SettingsAlertsViewProps {
   onUpdateSettings: (settings: AlertSettings) => void;
   onImportState: (newState: AppState) => void;
   onResetDemoData: () => void;
+  onStartCleanPantry: () => void;
 }
 
 export function SettingsAlertsView({
@@ -22,12 +33,15 @@ export function SettingsAlertsView({
   onUpdateSettings,
   onImportState,
   onResetDemoData,
+  onStartCleanPantry,
 }: SettingsAlertsViewProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [permission, setPermission] = useState<PushSupportState>(() =>
     getNotificationPermissionState()
   );
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [copiedAppLink, setCopiedAppLink] = useState(false);
+  const [confirmClean, setConfirmClean] = useState(false);
 
   const { settings, inventory } = appState;
   const expiryDigest = buildExpiryAlertMessage(
@@ -73,6 +87,38 @@ export function SettingsAlertsView({
     }
   }
 
+  async function handleShareAppLink() {
+    const cleanUrl = `${window.location.origin}${window.location.pathname}`;
+    try {
+      if (navigator.share) {
+        await navigator.share({
+          title: 'DespensaForte — Controle de Gastos de Feira e Estocagem',
+          text: 'Organize seus gastos de feira, despensa rotineira e estocagem direto no navegador (dados privados por dispositivo).',
+          url: cleanUrl,
+        });
+        setFeedback('Link do app compartilhado! Cada pessoa terá seus próprios dados privados no navegador dela.');
+        return;
+      }
+      if (navigator.clipboard && 'writeText' in navigator.clipboard) {
+        await navigator.clipboard.writeText(cleanUrl);
+        setCopiedAppLink(true);
+        setFeedback('Link do app copiado! Quando outra pessoa abrir, os dados dela ficam 100% privados no próprio navegador.');
+        setTimeout(() => setCopiedAppLink(false), 4000);
+        return;
+      }
+      window.prompt('Copie o link do DespensaForte para compartilhar:', cleanUrl);
+    } catch {
+      try {
+        await navigator.clipboard.writeText(cleanUrl);
+        setCopiedAppLink(true);
+        setFeedback('Link do app copiado para a área de transferência!');
+        setTimeout(() => setCopiedAppLink(false), 4000);
+      } catch {
+        window.prompt('Copie o link do DespensaForte para compartilhar:', cleanUrl);
+      }
+    }
+  }
+
   function handleExportBackup() {
     const json = exportStateAsJson(appState);
     const blob = new Blob([json], { type: 'application/json' });
@@ -97,7 +143,7 @@ export function SettingsAlertsView({
   }
 
   const expiringList: Array<{ item: InventoryItem }> = inventory
-    .filter((i) => i.quantity > 0)
+    .filter((i) => i.quantity > 0 && hasValidExpiryDate(i.expiryDate))
     .sort((a, b) => a.expiryDate.localeCompare(b.expiryDate))
     .slice(0, 5)
     .map((item) => ({ item }));
@@ -106,10 +152,10 @@ export function SettingsAlertsView({
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold tracking-tight text-slate-900">
-          Alertas Push e Armazenamento Local
+          Ajustes, Alertas e Compartilhamento
         </h1>
         <p className="mt-1 text-sm text-slate-600">
-          Configure notificações de vencimento no navegador e gerencie o backup offline do seu estoque.
+          Configure o custo diário para autonomia da reserva, alertas de validade, backup offline e compartilhamento do app.
         </p>
       </div>
 
@@ -120,15 +166,15 @@ export function SettingsAlertsView({
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        {/* Push Notifications Panel */}
+        {/* Parameters & Push Notifications Panel */}
         <section className="lg:col-span-7 bg-white border border-slate-200 rounded-xl p-6 space-y-5">
           <div className="flex items-start justify-between gap-4 pb-4 border-b border-slate-100">
             <div>
               <h2 className="text-base font-semibold text-slate-900">
-                Notificações Push de Validade
+                Parâmetros da Casa e Notificações de Validade
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Status da permissão no navegador:{' '}
+                Permissão push no navegador:{' '}
                 <strong className="text-slate-900">
                   {permission === 'granted'
                     ? 'Autorizado'
@@ -143,10 +189,53 @@ export function SettingsAlertsView({
             <BellRing className="w-5 h-5 text-emerald-700 shrink-0" aria-hidden="true" />
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label htmlFor="setting-household" className="block text-xs font-medium text-slate-700 mb-1">
+                Pessoas na casa
+              </label>
+              <input
+                id="setting-household"
+                type="number"
+                min="1"
+                max="20"
+                value={settings.householdSize}
+                onChange={(e) =>
+                  onUpdateSettings({
+                    ...settings,
+                    householdSize: Math.max(1, parseInt(e.target.value, 10) || 2),
+                  })
+                }
+                className="w-full text-sm font-mono tabular-nums border border-slate-200 rounded-lg px-3 py-2 text-slate-900"
+              />
+            </div>
+
+            <div>
+              <label htmlFor="setting-daily-cost" className="block text-xs font-medium text-slate-700 mb-1">
+                Custo diário alimentar por pessoa (R$)
+              </label>
+              <input
+                id="setting-daily-cost"
+                type="number"
+                min="1"
+                step="1"
+                value={settings.dailyCostPerPerson}
+                onChange={(e) =>
+                  onUpdateSettings({
+                    ...settings,
+                    dailyCostPerPerson: Math.max(1, parseFloat(e.target.value) || 25),
+                  })
+                }
+                className="w-full text-sm font-mono tabular-nums border border-slate-200 rounded-lg px-3 py-2 text-slate-900"
+              />
+              <p className="text-[11px] text-slate-500 mt-1">
+                Usado para estimar dias de autonomia pelo valor investido na Despensa Estocada.
+              </p>
+            </div>
+
             <div>
               <label htmlFor="setting-warning-days" className="block text-xs font-medium text-slate-700 mb-1">
-                Alerta preventivo (dias)
+                Alerta preventivo (dias antes do vencimento)
               </label>
               <input
                 id="setting-warning-days"
@@ -166,7 +255,7 @@ export function SettingsAlertsView({
 
             <div>
               <label htmlFor="setting-critical-days" className="block text-xs font-medium text-slate-700 mb-1">
-                Alerta crítico (dias)
+                Alerta crítico (dias antes do vencimento)
               </label>
               <input
                 id="setting-critical-days"
@@ -178,26 +267,6 @@ export function SettingsAlertsView({
                   onUpdateSettings({
                     ...settings,
                     criticalDays: Math.max(1, parseInt(e.target.value, 10) || 7),
-                  })
-                }
-                className="w-full text-sm font-mono tabular-nums border border-slate-200 rounded-lg px-3 py-2 text-slate-900"
-              />
-            </div>
-
-            <div>
-              <label htmlFor="setting-household" className="block text-xs font-medium text-slate-700 mb-1">
-                Pessoas na casa
-              </label>
-              <input
-                id="setting-household"
-                type="number"
-                min="1"
-                max="20"
-                value={settings.householdSize}
-                onChange={(e) =>
-                  onUpdateSettings({
-                    ...settings,
-                    householdSize: Math.max(1, parseInt(e.target.value, 10) || 2),
                   })
                 }
                 className="w-full text-sm font-mono tabular-nums border border-slate-200 rounded-lg px-3 py-2 text-slate-900"
@@ -231,38 +300,89 @@ export function SettingsAlertsView({
               </div>
             ) : (
               <p className="mt-1 text-xs text-slate-500">
-                Nenhum item vence dentro da janela configurada de {settings.warningDays} dias.
+                Nenhum item com validade informada vence dentro da janela de {settings.warningDays} dias.
               </p>
             )}
           </div>
         </section>
 
-        {/* Local Storage & Portability */}
+        {/* Local Storage, Sharing & Zero Start */}
         <section className="lg:col-span-5 bg-white border border-slate-200 rounded-xl p-6 space-y-5">
           <div className="flex items-start justify-between gap-4 pb-4 border-b border-slate-100">
             <div>
               <h2 className="text-base font-semibold text-slate-900">
-                Privacidade e Dados Locais
+                Privacidade, Compartilhamento e Dados
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Todo o seu estoque, histórico de preços e cupons ficam salvos no seu navegador.
+                Cada pessoa que abre o link tem uma despensa 100% privada salva apenas no próprio navegador.
               </p>
             </div>
-            <Shield className="w-5 h-5 text-slate-700 shrink-0" aria-hidden="true" />
+            <Shield className="w-5 h-5 text-emerald-700 shrink-0" aria-hidden="true" />
           </div>
 
           <div className="text-xs text-slate-600 space-y-1.5">
             <p>
-              Registros salvos: <strong className="font-mono text-slate-900">{appState.inventory.length}</strong> lotes em estoque ·{' '}
+              Registros neste dispositivo:{' '}
+              <strong className="font-mono text-slate-900">{appState.inventory.length}</strong> itens ·{' '}
               <strong className="font-mono text-slate-900">{appState.priceHistory.length}</strong> cotações ·{' '}
               <strong className="font-mono text-slate-900">{appState.receipts.length}</strong> cupons
             </p>
             <p>
-              O envio externo ocorre apenas quando você envia uma foto de cupom para leitura OCR.
+              Nenhuma conta ou senha é exigida. O servidor só é acionado quando você envia uma foto de cupom para leitura OCR.
             </p>
           </div>
 
-          <div className="space-y-2.5 pt-2">
+          <div className="space-y-2.5 pt-1">
+            <button
+              type="button"
+              onClick={handleShareAppLink}
+              className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors"
+            >
+              {copiedAppLink ? (
+                <Check className="w-4 h-4" aria-hidden="true" />
+              ) : (
+                <Share2 className="w-4 h-4" aria-hidden="true" />
+              )}
+              <span>Compartilhar Link do App</span>
+            </button>
+
+            {!confirmClean ? (
+              <button
+                type="button"
+                onClick={() => setConfirmClean(true)}
+                className="w-full inline-flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium text-amber-900 bg-amber-50 border border-amber-200 hover:bg-amber-100 rounded-lg"
+              >
+                <Eraser className="w-4 h-4" aria-hidden="true" />
+                <span>Começar Minha Despensa Limpa (Zero)</span>
+              </button>
+            ) : (
+              <div className="p-3 rounded-lg border border-amber-300 bg-amber-50 space-y-2">
+                <p className="text-xs font-medium text-amber-950">
+                  Isso apagará todos os itens, cupons e histórico salvos neste navegador para começar do zero. Deseja continuar?
+                </p>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onStartCleanPantry();
+                      setConfirmClean(false);
+                      setFeedback('Despensa limpa! Você começou do zero e já pode escanear seu primeiro cupom.');
+                    }}
+                    className="flex-1 px-3 py-1.5 text-xs font-semibold text-white bg-red-700 hover:bg-red-800 rounded-md"
+                  >
+                    Sim, zerar tudo
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmClean(false)}
+                    className="flex-1 px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 rounded-md"
+                  >
+                    Cancelar
+                  </button>
+                </div>
+              </div>
+            )}
+
             <button
               type="button"
               onClick={handleExportBackup}
@@ -295,9 +415,10 @@ export function SettingsAlertsView({
               type="button"
               onClick={() => {
                 onResetDemoData();
+                setConfirmClean(false);
                 setFeedback('Dados restaurados para o conjunto inicial de demonstração.');
               }}
-              className="w-full inline-flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium text-red-700 bg-white border border-red-200 hover:bg-red-50 rounded-lg"
+              className="w-full inline-flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg"
             >
               <RotateCcw className="w-4 h-4" aria-hidden="true" />
               <span>Restaurar Dados de Demonstração</span>
@@ -307,13 +428,15 @@ export function SettingsAlertsView({
           {expiringList.length > 0 && (
             <div className="pt-4 border-t border-slate-100">
               <p className="text-xs font-medium text-slate-700 mb-2">
-                Próximos 5 lotes na fila PEPS
+                Próximos 5 lotes na fila PEPS (com validade)
               </p>
               <ul className="space-y-1.5 text-xs text-slate-600">
                 {expiringList.map(({ item }) => (
                   <li key={item.id} className="flex justify-between gap-2">
                     <span className="truncate">{item.name}</span>
-                    <span className="font-mono tabular-nums shrink-0">{item.expiryDate}</span>
+                    <span className="font-mono tabular-nums shrink-0">
+                      {formatDateBR(item.expiryDate)}
+                    </span>
                   </li>
                 ))}
               </ul>
