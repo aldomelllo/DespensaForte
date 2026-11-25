@@ -26,7 +26,7 @@ export default function handler(req: ApiRequestLike, res: ApiResponseLike) {
     status: 'ok',
     localFirst: true,
     ocrConfigured,
-    model: 'gemini-2.5-flash',
+    model: process.env.GEMINI_MODEL?.trim() || 'gemini-3.8-flash',
     timestamp: new Date().toISOString(),
   });
 }

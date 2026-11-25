@@ -78,57 +78,91 @@ export default async function handler(req: ApiRequestLike, res: ApiResponseLike)
       '6. Estime um preço médio de referência de mercado (estimatedMarketPrice) realista para supermercado brasileiro em Reais (BRL), ou igual ao unitPrice se incerto.',
     ].join('\n');
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: {
-        parts: [
-          {
-            inlineData: {
-              mimeType: safeMimeType,
-              data: cleanBase64,
-            },
-          },
-          { text: prompt },
-        ],
-      },
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            storeName: { type: Type.STRING, description: 'Nome do mercado ou estabelecimento' },
-            purchaseDate: { type: Type.STRING, description: 'Data da compra YYYY-MM-DD' },
-            totalAmount: { type: Type.NUMBER, description: 'Valor total do cupom fiscal em BRL' },
+    const candidateModels = Array.from(
+      new Set(
+        [
+          process.env.GEMINI_MODEL?.trim(),
+          'gemini-3.8-flash',
+          'gemini-3.5-flash',
+          'gemini-2.5-flash',
+        ].filter((m): m is string => Boolean(m))
+      )
+    );
+
+    const requestConfig = {
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          storeName: { type: Type.STRING, description: 'Nome do mercado ou estabelecimento' },
+          purchaseDate: { type: Type.STRING, description: 'Data da compra YYYY-MM-DD' },
+          totalAmount: { type: Type.NUMBER, description: 'Valor total do cupom fiscal em BRL' },
+          items: {
+            type: Type.ARRAY,
             items: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  name: { type: Type.STRING, description: 'Nome legível do produto com embalagem/peso' },
-                  category: { type: Type.STRING, description: 'Uma das categorias válidas' },
-                  quantity: { type: Type.NUMBER, description: 'Quantidade comprada' },
-                  unit: { type: Type.STRING, description: 'Unidade de medida (un, kg, L, pct, lata, cx, bdj)' },
-                  unitPrice: { type: Type.NUMBER, description: 'Preço unitário pago em BRL' },
-                  totalPrice: { type: Type.NUMBER, description: 'Preço total da linha em BRL' },
-                  suggestedShelfLifeDays: { type: Type.INTEGER, description: 'Dias estimados de validade para sugestão sob demanda' },
-                  estimatedMarketPrice: { type: Type.NUMBER, description: 'Preço unitário de referência estimado em BRL' },
-                },
-                required: [
-                  'name',
-                  'category',
-                  'quantity',
-                  'unit',
-                  'unitPrice',
-                  'totalPrice',
-                  'suggestedShelfLifeDays',
-                ],
+              type: Type.OBJECT,
+              properties: {
+                name: { type: Type.STRING, description: 'Nome legível do produto com embalagem/peso' },
+                category: { type: Type.STRING, description: 'Uma das categorias válidas' },
+                quantity: { type: Type.NUMBER, description: 'Quantidade comprada' },
+                unit: { type: Type.STRING, description: 'Unidade de medida (un, kg, L, pct, lata, cx, bdj)' },
+                unitPrice: { type: Type.NUMBER, description: 'Preço unitário pago em BRL' },
+                totalPrice: { type: Type.NUMBER, description: 'Preço total da linha em BRL' },
+                suggestedShelfLifeDays: { type: Type.INTEGER, description: 'Dias estimados de validade para sugestão sob demanda' },
+                estimatedMarketPrice: { type: Type.NUMBER, description: 'Preço unitário de referência estimado em BRL' },
               },
+              required: [
+                'name',
+                'category',
+                'quantity',
+                'unit',
+                'unitPrice',
+                'totalPrice',
+                'suggestedShelfLifeDays',
+              ],
             },
           },
-          required: ['storeName', 'purchaseDate', 'totalAmount', 'items'],
         },
+        required: ['storeName', 'purchaseDate', 'totalAmount', 'items'],
       },
-    });
+    };
+
+    const contents = {
+      parts: [
+        {
+          inlineData: {
+            mimeType: safeMimeType,
+            data: cleanBase64,
+          },
+        },
+        { text: prompt },
+      ],
+    };
+
+    let response = null;
+    let lastError: unknown = null;
+
+    for (const modelName of candidateModels) {
+      try {
+        response = await ai.models.generateContent({
+          model: modelName,
+          contents,
+          config: requestConfig,
+        });
+        break;
+      } catch (err) {
+        lastError = err;
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/404|NOT_FOUND|no longer available/i.test(msg)) {
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    if (!response) {
+      throw lastError ?? new Error('Nenhum modelo Gemini disponível respondeu à solicitação.');
+    }
 
     const rawText = (response.text ?? '').trim();
     if (!rawText) {
